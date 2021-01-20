@@ -1,0 +1,4590 @@
+diff --git a/xnu-qemu-arm64-5.1.0/hw/arm/Makefile.objs b/xnu-qemu-arm64-5.1.0/hw/arm/Makefile.objs
+index 534a6a1..3cd9b77 100644
+--- a/xnu-qemu-arm64-5.1.0/hw/arm/Makefile.objs
++++ b/xnu-qemu-arm64-5.1.0/hw/arm/Makefile.objs
+@@ -1,4 +1,4 @@
+-obj-y += boot.o
++obj-y += boot.o xnu_fb_cfg.o xnu_trampoline_hook.o xnu_pagetable.o xnu_cpacr.o xnu_dtb.o xnu_file_mmio_dev.o xnu_mem.o xnu.o j273_macos11.o guest-services.o guest-socket.o guest-fds.o guest-file.o
+ obj-$(CONFIG_PLATFORM_BUS) += sysbus-fdt.o
+ obj-$(CONFIG_ARM_VIRT) += virt.o
+ obj-$(CONFIG_ACPI) += virt-acpi-build.o
+diff --git a/xnu-qemu-arm64-5.1.0/hw/arm/guest-fds.c b/xnu-qemu-arm64-5.1.0/hw/arm/guest-fds.c
+new file mode 100644
+index 0000000..f109443
+--- /dev/null
++++ b/xnu-qemu-arm64-5.1.0/hw/arm/guest-fds.c
+@@ -0,0 +1,72 @@
++/*
++ * QEMU TCP Tunnelling
++ *
++ * Copyright (c) 2019 Lev Aronsky <aronsky@gmail.com>
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a copy
++ * of this software and associated documentation files (the "Software"), to deal
++ * in the Software without retvaltriction, including without limitation the rights
++ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
++ * copies of the Software, and to permit persons to whom the Software is
++ * furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice shall be included in
++ * all copies or substantial portions of the Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPretvalS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
++ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
++ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
++ * THE SOFTWARE.
++ */
++
++#include <stdarg.h>
++
++#include "hw/arm/guest-services/fds.h"
++#include "cpu.h"
++
++int32_t guest_svcs_fds[MAX_FD_COUNT] = { [0 ... MAX_FD_COUNT-1] = -1 };
++
++int32_t qc_handle_close(CPUState *cpu, int32_t fd)
++{
++    VERIFY_FD(fd);
++
++    int retval = -1;
++
++    if ((retval = close(guest_svcs_fds[fd])) < 0) {
++        guest_svcs_errno = errno;
++    } else {
++        // TODO: should this be in the "else" clause, or performed regardless?
++        guest_svcs_fds[fd] = -1;
++    }
++
++    return retval;
++}
++
++int32_t qc_handle_fcntl_getfl(CPUState *cpu, int32_t fd)
++{
++    VERIFY_FD(fd);
++
++    int retval = -1;
++
++    if ((retval = fcntl(guest_svcs_fds[fd], F_GETFL)) < 0) {
++        guest_svcs_errno = errno;
++    }
++
++    return retval;
++}
++
++int32_t qc_handle_fcntl_setfl(CPUState *cpu, int32_t fd, int32_t flags)
++{
++    VERIFY_FD(fd);
++
++    int retval = -1;
++
++    if ((retval = fcntl(guest_svcs_fds[fd], F_SETFL, flags)) < 0) {
++        guest_svcs_errno = errno;
++    }
++
++    return retval;
++}
+diff --git a/xnu-qemu-arm64-5.1.0/hw/arm/guest-file.c b/xnu-qemu-arm64-5.1.0/hw/arm/guest-file.c
+new file mode 100644
+index 0000000..f9f4709
+--- /dev/null
++++ b/xnu-qemu-arm64-5.1.0/hw/arm/guest-file.c
+@@ -0,0 +1,111 @@
++/*
++ * QEMU Host file guest access
++ *
++ * Copyright (c) 2020 Jonathan Afek <jonyafek@me.com>
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a copy
++ * of this software and associated documentation files (the "Software"), to deal
++ * in the Software without restriction, including without limitation the rights
++ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
++ * copies of the Software, and to permit persons to whom the Software is
++ * furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice shall be included in
++ * all copies or substantial portions of the Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
++ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
++ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
++ * THE SOFTWARE.
++ */
++
++#include "hw/arm/guest-services/file.h"
++#include "cpu.h"
++
++static int32_t file_fds[MAX_FILE_FDS] = { [0 ... MAX_FILE_FDS-1] = -1 };
++
++void qc_file_open(uint64_t index, const char *filename)
++{
++    if (index >= MAX_FILE_FDS) {
++        abort();
++    }
++    if (-1 != file_fds[index]) {
++        abort();
++    }
++    file_fds[index] = open(filename, O_RDWR);
++    if (-1 == file_fds[index]) {
++        abort();
++    }
++}
++
++int64_t qc_handle_write_file(CPUState *cpu, uint64_t buffer_guest_ptr,
++                             uint64_t length, uint64_t offset, uint64_t index)
++{
++    uint8_t buf[MAX_FILE_TRANSACTION_LEN];
++
++    if (index >= MAX_FILE_FDS) {
++        abort();
++    }
++    int fd = file_fds[index];
++    if (-1 == fd) {
++        abort();
++    }
++    if (offset != lseek(fd, offset, SEEK_SET)) {
++        abort();
++    }
++    if (length > MAX_FILE_TRANSACTION_LEN) {
++        abort();
++    }
++    cpu_memory_rw_debug(cpu, buffer_guest_ptr, &buf[0], length, 0);
++    if (length != write(fd, &buf[0], length)) {
++        abort();
++    }
++
++    return 0;
++}
++
++int64_t qc_handle_read_file(CPUState *cpu, uint64_t buffer_guest_ptr,
++                            uint64_t length, uint64_t offset, uint64_t index)
++{
++    uint8_t buf[MAX_FILE_TRANSACTION_LEN];
++    if (index >= MAX_FILE_FDS) {
++        abort();
++    }
++    int fd = file_fds[index];
++    if (-1 == fd) {
++        abort();
++    }
++    if (offset != lseek(fd, offset, SEEK_SET)) {
++        abort();
++    }
++    if (length > MAX_FILE_TRANSACTION_LEN) {
++        abort();
++    }
++    if (length != read(fd, &buf[0], length)) {
++        abort();
++    }
++    cpu_memory_rw_debug(cpu, buffer_guest_ptr, &buf[0], length, 1);
++
++    return 0;
++}
++
++int64_t qc_handle_size_file(uint64_t index)
++{
++    struct stat st;
++
++    if (index >= MAX_FILE_FDS) {
++        abort();
++    }
++    int fd = file_fds[index];
++    if (-1 == fd) {
++        abort();
++    }
++    if (-1 == fstat(fd, &st)) {
++        abort();
++    }
++
++    return st.st_size;
++}
+diff --git a/xnu-qemu-arm64-5.1.0/hw/arm/guest-services.c b/xnu-qemu-arm64-5.1.0/hw/arm/guest-services.c
+new file mode 100644
+index 0000000..fed1a7e
+--- /dev/null
++++ b/xnu-qemu-arm64-5.1.0/hw/arm/guest-services.c
+@@ -0,0 +1,185 @@
++/*
++ * QEMU TCP Tunnelling
++ *
++ * Copyright (c) 2019 Lev Aronsky <aronsky@gmail.com>
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a copy
++ * of this software and associated documentation files (the "Software"), to deal
++ * in the Software without restriction, including without limitation the rights
++ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
++ * copies of the Software, and to permit persons to whom the Software is
++ * furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice shall be included in
++ * all copies or substantial portions of the Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
++ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
++ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
++ * THE SOFTWARE.
++ */
++
++#include "qemu/osdep.h"
++#include "qapi/error.h"
++#include "qemu-common.h"
++#include "hw/arm/boot.h"
++#include "exec/address-spaces.h"
++#include "hw/misc/unimp.h"
++#include "sysemu/sysemu.h"
++#include "qemu/error-report.h"
++#include "hw/platform-bus.h"
++
++#include "hw/arm/j273_macos11.h"
++#include "hw/arm/guest-services/general.h"
++#include "hw/arm/xnu_trampoline_hook.h"
++
++int32_t guest_svcs_errno = 0;
++
++uint64_t qemu_call_status(CPUARMState *env, const ARMCPRegInfo *ri)
++{
++    // NOT USED FOR NOW
++    return 0;
++}
++
++void qemu_call(CPUARMState *env, const ARMCPRegInfo *ri, uint64_t value)
++{
++    CPUState *cpu = qemu_get_cpu(0);
++    qemu_call_t qcall;
++    uint64_t i = 0;
++
++    static uint8_t hooks_installed = false;
++
++    if (!value) {
++        // Special case: not a regular QEMU call. This is used by our
++        // kernel task port patch to notify of the readiness for the
++        // hook installation.
++
++        J273MachineState *nms = J273_MACHINE(qdev_get_machine());
++        KernelTrHookParams *hook = &nms->hook;
++
++        if (0 != hook->va) {
++            //install the hook here because we need the MMU to be already
++            //configured and all the memory mapped before installing the hook
++            xnu_hook_tr_copy_install(hook->va, hook->pa, hook->buf_va,
++                                     hook->buf_pa, hook->code, hook->code_size,
++                                     hook->buf_size, hook->scratch_reg);
++
++        }
++
++        if (!hooks_installed) {
++            for (i = 0; i < nms->hook_funcs_count; i++) {
++                xnu_hook_tr_copy_install(nms->hook_funcs[i].va,
++                                         nms->hook_funcs[i].pa,
++                                         nms->hook_funcs[i].buf_va,
++                                         nms->hook_funcs[i].buf_pa,
++                                         nms->hook_funcs[i].code,
++                                         nms->hook_funcs[i].code_size,
++                                         nms->hook_funcs[i].buf_size,
++                                         nms->hook_funcs[i].scratch_reg);
++            }
++            hooks_installed = true;
++        }
++
++        //emulate original opcode: str x19, [x20]
++        value = env->xregs[19];
++        cpu_memory_rw_debug(cpu, env->xregs[20], (uint8_t*) &value,
++                            sizeof(value), 1);
++        ////emulate original opcode: str x20, [x23]
++        //value = env->xregs[20];
++        //cpu_memory_rw_debug(cpu, env->xregs[23], (uint8_t*) &value,
++        //                    sizeof(value), 1);
++
++        return;
++    }
++
++    // Read the request
++    cpu_memory_rw_debug(cpu, value, (uint8_t*) &qcall, sizeof(qcall), 0);
++
++    switch (qcall.call_number) {
++        // File Descriptors
++        case QC_CLOSE:
++            qcall.retval = qc_handle_close(cpu, qcall.args.close.fd);
++            break;
++        case QC_FCNTL:
++            switch (qcall.args.fcntl.cmd) {
++                case F_GETFL:
++                    qcall.retval = qc_handle_fcntl_getfl(
++                        cpu, qcall.args.fcntl.fd);
++                    break;
++                case F_SETFL:
++                    qcall.retval = qc_handle_fcntl_setfl(
++                        cpu, qcall.args.fcntl.fd, qcall.args.fcntl.flags);
++                    break;
++                default:
++                    guest_svcs_errno = EINVAL;
++                    qcall.retval = -1;
++            }
++            break;
++
++        // Socket API
++        case QC_SOCKET:
++            qcall.retval = qc_handle_socket(cpu, qcall.args.socket.domain,
++                                            qcall.args.socket.type,
++                                            qcall.args.socket.protocol);
++            break;
++        case QC_ACCEPT:
++            qcall.retval = qc_handle_accept(cpu, qcall.args.accept.socket,
++                                            qcall.args.accept.addr,
++                                            qcall.args.accept.addrlen);
++            break;
++        case QC_BIND:
++            qcall.retval = qc_handle_bind(cpu, qcall.args.bind.socket,
++                                          qcall.args.bind.addr,
++                                          qcall.args.bind.addrlen);
++            break;
++        case QC_CONNECT:
++            qcall.retval = qc_handle_connect(cpu, qcall.args.connect.socket,
++                                             qcall.args.connect.addr,
++                                             qcall.args.connect.addrlen);
++            break;
++        case QC_LISTEN:
++            qcall.retval = qc_handle_listen(cpu, qcall.args.listen.socket,
++                                            qcall.args.listen.backlog);
++            break;
++        case QC_RECV:
++            qcall.retval = qc_handle_recv(cpu, qcall.args.recv.socket,
++                                          qcall.args.recv.buffer,
++                                          qcall.args.recv.length,
++                                          qcall.args.recv.flags);
++            break;
++        case QC_SEND:
++            qcall.retval = qc_handle_send(cpu, qcall.args.send.socket,
++                                          qcall.args.send.buffer,
++                                          qcall.args.send.length,
++                                          qcall.args.send.flags);
++            break;
++        case QC_WRITE_FILE:
++            qcall.retval = qc_handle_write_file(cpu,
++                                       qcall.args.write_file.buffer_guest_ptr,
++                                       qcall.args.write_file.length,
++                                       qcall.args.write_file.offset,
++                                       qcall.args.write_file.index);
++            break;
++        case QC_READ_FILE:
++            qcall.retval = qc_handle_read_file(cpu,
++                                       qcall.args.read_file.buffer_guest_ptr,
++                                       qcall.args.read_file.length,
++                                       qcall.args.read_file.offset,
++                                       qcall.args.read_file.index);
++            break;
++        case QC_SIZE_FILE:
++            qcall.retval = qc_handle_size_file(qcall.args.size_file.index);
++            break;
++        default:
++            // TODO: handle unknown call numbers
++            break;
++    }
++
++    qcall.error = guest_svcs_errno;
++
++    // Write the response
++    cpu_memory_rw_debug(cpu, value, (uint8_t*) &qcall, sizeof(qcall), 1);
++}
+diff --git a/xnu-qemu-arm64-5.1.0/hw/arm/guest-socket.c b/xnu-qemu-arm64-5.1.0/hw/arm/guest-socket.c
+new file mode 100644
+index 0000000..fdf9d1e
+--- /dev/null
++++ b/xnu-qemu-arm64-5.1.0/hw/arm/guest-socket.c
+@@ -0,0 +1,192 @@
++/*
++ * QEMU TCP Tunnelling
++ *
++ * Copyright (c) 2019 Lev Aronsky <aronsky@gmail.com>
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a copy
++ * of this software and associated documentation files (the "Software"), to deal
++ * in the Software without retvaltriction, including without limitation the rights
++ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
++ * copies of the Software, and to permit persons to whom the Software is
++ * furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice shall be included in
++ * all copies or substantial portions of the Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPretvalS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
++ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
++ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
++ * THE SOFTWARE.
++ */
++
++#include "hw/arm/guest-services/socket.h"
++#include "hw/arm/guest-services/fds.h"
++#include "sys/socket.h"
++#include "cpu.h"
++
++#define SOCKET_TIMEOUT_USECS (10)
++
++static int32_t find_free_socket(void) {
++    for (int i = 0; i < MAX_FD_COUNT; ++i) {
++        if (-1 == guest_svcs_fds[i]) {
++            return i;
++        }
++    }
++
++    guest_svcs_errno = ENOMEM;
++    return -1;
++}
++
++int32_t qc_handle_socket(CPUState *cpu, int32_t domain, int32_t type,
++                         int32_t protocol)
++{
++    int retval = find_free_socket();
++
++    if (retval < 0) {
++        guest_svcs_errno = ENOTSOCK;
++    } else if ((guest_svcs_fds[retval] = socket(domain, type, protocol)) < 0) {
++        retval = -1;
++        guest_svcs_errno = errno;
++    }
++
++    return retval;
++}
++
++int32_t qc_handle_accept(CPUState *cpu, int32_t sckt, struct sockaddr *g_addr,
++                         socklen_t *g_addrlen)
++{
++    struct sockaddr_in addr;
++    socklen_t addrlen;
++
++    VERIFY_FD(sckt);
++
++    int retval = find_free_socket();
++
++    // TODO: timeout
++    if (retval < 0) {
++        guest_svcs_errno = ENOTSOCK;
++    } else if ((guest_svcs_fds[retval] = accept(guest_svcs_fds[sckt],
++                                         (struct sockaddr *) &addr,
++                                         &addrlen)) < 0) {
++        retval = -1;
++        guest_svcs_errno = errno;
++    } else {
++        cpu_memory_rw_debug(cpu, (target_ulong) g_addr, (uint8_t*) &addr,
++                            sizeof(addr), 1);
++        cpu_memory_rw_debug(cpu, (target_ulong) g_addrlen,
++                            (uint8_t*) &addrlen, sizeof(addrlen), 1);
++    }
++
++    return retval;
++}
++
++int32_t qc_handle_bind(CPUState *cpu, int32_t sckt, struct sockaddr *g_addr,
++                       socklen_t addrlen)
++{
++    struct sockaddr_in addr;
++
++    VERIFY_FD(sckt);
++
++    int retval = 0;
++
++    if (addrlen > sizeof(addr)) {
++        guest_svcs_errno = ENOMEM;
++    } else {
++        cpu_memory_rw_debug(cpu, (target_ulong) g_addr, (uint8_t*) &addr,
++                            sizeof(addr), 0);
++
++        if ((retval = bind(guest_svcs_fds[sckt], (struct sockaddr *) &addr,
++                           addrlen)) < 0) {
++            guest_svcs_errno = errno;
++        } else {
++            cpu_memory_rw_debug(cpu, (target_ulong) g_addr, (uint8_t*) &addr,
++                                sizeof(addr), 1);
++        }
++    }
++
++    return retval;
++}
++
++int32_t qc_handle_connect(CPUState *cpu, int32_t sckt, struct sockaddr *g_addr,
++                          socklen_t addrlen)
++{
++    struct sockaddr_in addr;
++
++    VERIFY_FD(sckt);
++
++    int retval = 0;
++
++    if (addrlen > sizeof(addr)) {
++        guest_svcs_errno = ENOMEM;
++    } else {
++        cpu_memory_rw_debug(cpu, (target_ulong) g_addr, (uint8_t*) &addr,
++                            sizeof(addr), 0);
++
++        if ((retval = connect(guest_svcs_fds[sckt], (struct sockaddr *) &addr,
++                            addrlen)) < 0) {
++            guest_svcs_errno = errno;
++        } else {
++            cpu_memory_rw_debug(cpu, (target_ulong) g_addr, (uint8_t*) &addr,
++                                sizeof(addr), 1);
++        }
++    }
++
++    return retval;
++}
++
++int32_t qc_handle_listen(CPUState *cpu, int32_t sckt, int32_t backlog)
++{
++    VERIFY_FD(sckt);
++
++    int retval = 0;
++
++    if ((retval = listen(guest_svcs_fds[sckt], backlog)) < 0) {
++        guest_svcs_errno = errno;
++    }
++
++    return retval;
++}
++
++int32_t qc_handle_recv(CPUState *cpu, int32_t sckt, void *g_buffer,
++                       size_t length, int32_t flags)
++{
++    VERIFY_FD(sckt);
++    uint8_t buffer[MAX_BUF_SIZE];
++
++    int retval = -1;
++
++    // TODO: timeout
++    if (length > MAX_BUF_SIZE) {
++        guest_svcs_errno = ENOMEM;
++    } else if ((retval = recv(guest_svcs_fds[sckt], buffer, length, flags)) <= 0) {
++        guest_svcs_errno = errno;
++    } else {
++        cpu_memory_rw_debug(cpu, (target_ulong) g_buffer, buffer, retval, 1);
++    }
++
++    return retval;
++}
++
++int32_t qc_handle_send(CPUState *cpu, int32_t sckt, void *g_buffer,
++                       size_t length, int32_t flags)
++{
++    VERIFY_FD(sckt);
++    uint8_t buffer[MAX_BUF_SIZE];
++
++    int retval = -1;
++
++    if (length > MAX_BUF_SIZE) {
++        guest_svcs_errno = ENOMEM;
++    } else {
++        cpu_memory_rw_debug(cpu, (target_ulong) g_buffer, buffer, length, 0);
++
++        if ((retval = send(guest_svcs_fds[sckt], buffer, length, flags)) < 0) {
++            guest_svcs_errno = errno;
++        }
++    }
++
++    return retval;
++}
+diff --git a/xnu-qemu-arm64-5.1.0/hw/arm/j273_macos11.c b/xnu-qemu-arm64-5.1.0/hw/arm/j273_macos11.c
+new file mode 100644
+index 0000000..6cda40a
+--- /dev/null
++++ b/xnu-qemu-arm64-5.1.0/hw/arm/j273_macos11.c
+@@ -0,0 +1,997 @@
++/*
++ * macOS 11 Big Sur - j273 - A12Z
++ *
++ * Copyright (c) 2019 Jonathan Afek <jonyafek@me.com>
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a copy
++ * of this software and associated documentation files (the "Software"), to deal
++ * in the Software without restriction, including without limitation the rights
++ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
++ * copies of the Software, and to permit persons to whom the Software is
++ * furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice shall be included in
++ * all copies or substantial portions of the Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
++ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
++ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
++ * THE SOFTWARE.
++ */
++
++#include "qemu/osdep.h"
++#include "qapi/error.h"
++#include "qemu-common.h"
++#include "hw/arm/boot.h"
++#include "exec/address-spaces.h"
++#include "hw/misc/unimp.h"
++#include "sysemu/sysemu.h"
++#include "sysemu/reset.h"
++#include "qemu/error-report.h"
++#include "hw/platform-bus.h"
++
++#include "hw/arm/j273_macos11.h"
++
++#include "hw/arm/exynos4210.h"
++#include "hw/arm/guest-services/general.h"
++
++#define J273_SECURE_RAM_SIZE (0x100000)
++#define J273_PHYS_BASE (0x40000000)
++
++//compiled nop instruction: mov x0, x0
++#define NOP_INST (0xaa0003e0)
++#define RET_INST (0xd65f03c0) // *NEW*
++#define MOV_W0_01_INST (0x52800020)
++#define CMP_X9_x9_INST (0xeb09013f)
++//compiled  instruction: mov w7, #0
++#define W7_ZERO_INST (0x52800007)
++#define W10_ZERO_INST (0x5280000a)
++#define W23_ZERO_INST (0x52800017)
++#define ORR_X0_2_INST (0xb27f0000) // *NEW*
++
++//hook the kernel to execute our "driver" code in this function
++//after things are already running in the kernel but the root mount is not
++//yet mounted.
++//We chose this place in the beginning of ubc_init() inlined in bsd_init()
++//because enough things are up and running for our driver to properly setup,
++//This means that global IOKIT locks and dictionaries are already initialized
++//and in general, the IOKIT system is already initialized.
++//We are now able to initialize our driver and attach it to an existing
++//IOReg object.
++//On the other hand, no mounting of any FS happened yet so we have a chance
++//for our block device driver to present a new block device that will be
++//mounted on the root mount.
++//We need to choose the hook location carefully.
++//We need 3 instructions in a row that we overwrite that are not location
++//dependant (such as adr, adrp and branching) as we are going to execute
++//them elsewhere.
++//We also need a register to use as a scratch register that its value is
++//disregarded right after the hook and does not affect anything.
++#define UBC_INIT_VADDR_16B92 (0xfffffff0073dec10)
++
++#define J273_CPREG_FUNCS(name) \
++static uint64_t j273_cpreg_read_##name(CPUARMState *env, \
++                                      const ARMCPRegInfo *ri) \
++{ \
++    J273MachineState *nms = (J273MachineState *)ri->opaque; \
++    return nms->J273_CPREG_VAR_NAME(name); \
++} \
++static void j273_cpreg_write_##name(CPUARMState *env, const ARMCPRegInfo *ri, \
++                                   uint64_t value) \
++{ \
++    J273MachineState *nms = (J273MachineState *)ri->opaque; \
++    nms->J273_CPREG_VAR_NAME(name) = value; \
++}
++
++#define J273_CPREG_DEF(p_name, p_op0, p_op1, p_crn, p_crm, p_op2, p_access) \
++    { .cp = CP_REG_ARM64_SYSREG_CP, \
++      .name = #p_name, .opc0 = p_op0, .crn = p_crn, .crm = p_crm, \
++      .opc1 = p_op1, .opc2 = p_op2, .access = p_access, .type = ARM_CP_IO, \
++      .state = ARM_CP_STATE_AA64, .readfn = j273_cpreg_read_##p_name, \
++      .writefn = j273_cpreg_write_##p_name }
++
++#define ENABLE_EL2_REGS
++
++J273_CPREG_FUNCS(ARM64_REG_EHID1)
++J273_CPREG_FUNCS(ARM64_REG_EHID10)
++J273_CPREG_FUNCS(ARM64_REG_EHID4)
++J273_CPREG_FUNCS(ARM64_REG_HID11)
++J273_CPREG_FUNCS(ARM64_REG_HID3)
++J273_CPREG_FUNCS(ARM64_REG_HID5)
++J273_CPREG_FUNCS(ARM64_REG_HID4)
++J273_CPREG_FUNCS(ARM64_REG_HID8)
++J273_CPREG_FUNCS(ARM64_REG_HID7)
++J273_CPREG_FUNCS(ARM64_REG_LSU_ERR_STS)
++J273_CPREG_FUNCS(PMC0)
++J273_CPREG_FUNCS(PMC1)
++J273_CPREG_FUNCS(PMCR1)
++J273_CPREG_FUNCS(PMSR)
++J273_CPREG_FUNCS(L2ACTLR_EL1)
++#ifdef ENABLE_EL2_REGS
++J273_CPREG_FUNCS(ARM64_REG_MIGSTS_EL1);
++J273_CPREG_FUNCS(ARM64_REG_KERNELKEYLO_EL1);
++J273_CPREG_FUNCS(ARM64_REG_KERNELKEYHI_EL1);
++J273_CPREG_FUNCS(ARM64_REG_VMSA_LOCK_EL1);
++J273_CPREG_FUNCS(APRR_EL0);
++J273_CPREG_FUNCS(APRR_EL1);
++J273_CPREG_FUNCS(CTRR_LOCK);
++J273_CPREG_FUNCS(CTRR_A_LWR_EL1);
++J273_CPREG_FUNCS(CTRR_A_UPR_EL1);
++J273_CPREG_FUNCS(CTRR_CTL_EL1);
++J273_CPREG_FUNCS(APRR_MASK_EN_EL1);
++J273_CPREG_FUNCS(APRR_MASK_EL0);
++J273_CPREG_FUNCS(ACC_CTRR_A_LWR_EL2);
++J273_CPREG_FUNCS(ACC_CTRR_A_UPR_EL2);
++J273_CPREG_FUNCS(ACC_CTRR_CTL_EL2);
++J273_CPREG_FUNCS(ACC_CTRR_LOCK_EL2);
++J273_CPREG_FUNCS(ARM64_REG_CYC_CFG);
++J273_CPREG_FUNCS(ARM64_REG_CYC_OVRD);
++J273_CPREG_FUNCS(IPI_SR);
++J273_CPREG_FUNCS(UPMCR0);
++J273_CPREG_FUNCS(UPMPCM);
++#endif
++
++static const ARMCPRegInfo j273_cp_reginfo_kvm[] = {
++    // Apple-specific registers
++    J273_CPREG_DEF(ARM64_REG_EHID1, 3, 0, 15, 3, 1, PL1_RW),
++    J273_CPREG_DEF(ARM64_REG_EHID10, 3, 0, 15, 10, 1, PL1_RW),
++    J273_CPREG_DEF(ARM64_REG_EHID4, 3, 0, 15, 4, 1, PL1_RW),
++    J273_CPREG_DEF(ARM64_REG_HID11, 3, 0, 15, 13, 0, PL1_RW),
++    J273_CPREG_DEF(ARM64_REG_HID3, 3, 0, 15, 3, 0, PL1_RW),
++    J273_CPREG_DEF(ARM64_REG_HID4, 3, 0, 15, 4, 0, PL1_RW),
++    J273_CPREG_DEF(ARM64_REG_HID5, 3, 0, 15, 5, 0, PL1_RW),
++    J273_CPREG_DEF(ARM64_REG_HID7, 3, 0, 15, 7, 0, PL1_RW),
++    J273_CPREG_DEF(ARM64_REG_HID8, 3, 0, 15, 8, 0, PL1_RW),
++    J273_CPREG_DEF(ARM64_REG_LSU_ERR_STS, 3, 3, 15, 0, 0, PL1_RW),
++    J273_CPREG_DEF(PMC0, 3, 2, 15, 0, 0, PL1_RW),
++    J273_CPREG_DEF(PMC1, 3, 2, 15, 1, 0, PL1_RW),
++    J273_CPREG_DEF(PMCR1, 3, 1, 15, 1, 0, PL1_RW),
++    J273_CPREG_DEF(PMSR, 3, 1, 15, 13, 0, PL1_RW),
++    J273_CPREG_DEF(L2ACTLR_EL1, 3, 1, 15, 0, 0, PL1_RW),
++#ifdef ENABLE_EL2_REGS
++    J273_CPREG_DEF(ARM64_REG_MIGSTS_EL1, 3, 4, 15, 0, 4, PL1_RW),
++    J273_CPREG_DEF(ARM64_REG_KERNELKEYLO_EL1, 3, 4, 15, 1, 0, PL1_RW),
++    J273_CPREG_DEF(ARM64_REG_KERNELKEYHI_EL1, 3, 4, 15, 1, 1, PL1_RW),
++    J273_CPREG_DEF(ARM64_REG_VMSA_LOCK_EL1, 3, 4, 15, 1, 2, PL1_RW),
++    J273_CPREG_DEF(APRR_EL0, 3, 4, 15, 2, 0, PL1_RW),
++    J273_CPREG_DEF(APRR_EL1, 3, 4, 15, 2, 1, PL1_RW),
++    J273_CPREG_DEF(CTRR_LOCK, 3, 4, 15, 2, 2, PL1_RW),
++    J273_CPREG_DEF(CTRR_A_LWR_EL1, 3, 4, 15, 2, 3, PL1_RW),
++    J273_CPREG_DEF(CTRR_A_UPR_EL1, 3, 4, 15, 2, 4, PL1_RW),
++    J273_CPREG_DEF(CTRR_CTL_EL1, 3, 4, 15, 2, 5, PL1_RW),
++    J273_CPREG_DEF(APRR_MASK_EN_EL1, 3, 4, 15, 2, 6, PL1_RW),
++    J273_CPREG_DEF(APRR_MASK_EL0, 3, 4, 15, 2, 7, PL1_RW),
++    J273_CPREG_DEF(ACC_CTRR_A_LWR_EL2, 3, 4, 15, 11, 0, PL1_RW),
++    J273_CPREG_DEF(ACC_CTRR_A_UPR_EL2, 3, 4, 15, 11, 1, PL1_RW),
++    J273_CPREG_DEF(ACC_CTRR_CTL_EL2, 3, 4, 15, 11, 4, PL1_RW),
++    J273_CPREG_DEF(ACC_CTRR_LOCK_EL2, 3, 4, 15, 11, 5, PL1_RW),
++    J273_CPREG_DEF(ARM64_REG_CYC_CFG, 3, 5, 15, 4, 0, PL1_RW),
++    J273_CPREG_DEF(ARM64_REG_CYC_OVRD, 3, 5, 15, 5, 0, PL1_RW),
++    J273_CPREG_DEF(IPI_SR, 3, 5, 15, 1, 1, PL1_RW),
++    J273_CPREG_DEF(UPMCR0, 3, 7, 15, 0, 4, PL1_RW),
++    J273_CPREG_DEF(UPMPCM, 3, 7, 15, 5, 4, PL1_RW),
++#endif
++
++    // Aleph-specific registers for communicating with QEMU
++
++    // REG_QEMU_CALL:
++    { .cp = CP_REG_ARM64_SYSREG_CP, .name = "REG_QEMU_CALL",
++      .opc0 = 3, .opc1 = 3, .crn = 15, .crm = 15, .opc2 = 0,
++      .access = PL0_RW, .type = ARM_CP_IO, .state = ARM_CP_STATE_AA64,
++      .readfn = qemu_call_status,
++      .writefn = qemu_call },
++
++    REGINFO_SENTINEL,
++};
++
++// This is the same as the array for kvm, but without
++// the L2ACTLR_EL1, which is already defined in TCG.
++// Duplicating this list isn't a perfect solution,
++// but it's quick and reliable.
++static const ARMCPRegInfo j273_cp_reginfo_tcg[] = {
++    // Apple-specific registers
++    J273_CPREG_DEF(ARM64_REG_EHID1, 3, 0, 15, 3, 1, PL1_RW),
++    J273_CPREG_DEF(ARM64_REG_EHID10, 3, 0, 15, 10, 1, PL1_RW),
++    J273_CPREG_DEF(ARM64_REG_EHID4, 3, 0, 15, 4, 1, PL1_RW),
++    J273_CPREG_DEF(ARM64_REG_HID11, 3, 0, 15, 13, 0, PL1_RW),
++    J273_CPREG_DEF(ARM64_REG_HID3, 3, 0, 15, 3, 0, PL1_RW),
++    J273_CPREG_DEF(ARM64_REG_HID5, 3, 0, 15, 5, 0, PL1_RW),
++    J273_CPREG_DEF(ARM64_REG_HID4, 3, 0, 15, 4, 0, PL1_RW),
++    J273_CPREG_DEF(ARM64_REG_HID8, 3, 0, 15, 8, 0, PL1_RW),
++    J273_CPREG_DEF(ARM64_REG_HID7, 3, 0, 15, 7, 0, PL1_RW),
++    J273_CPREG_DEF(ARM64_REG_LSU_ERR_STS, 3, 3, 15, 0, 0, PL1_RW),
++    J273_CPREG_DEF(PMC0, 3, 2, 15, 0, 0, PL1_RW),
++    J273_CPREG_DEF(PMC1, 3, 2, 15, 1, 0, PL1_RW),
++    J273_CPREG_DEF(PMCR1, 3, 1, 15, 1, 0, PL1_RW),
++    J273_CPREG_DEF(PMSR, 3, 1, 15, 13, 0, PL1_RW),
++#ifdef ENABLE_EL2_REGS
++    J273_CPREG_DEF(ARM64_REG_MIGSTS_EL1, 3, 4, 15, 0, 4, PL1_RW),
++    J273_CPREG_DEF(ARM64_REG_KERNELKEYLO_EL1, 3, 4, 15, 1, 0, PL1_RW),
++    J273_CPREG_DEF(ARM64_REG_KERNELKEYHI_EL1, 3, 4, 15, 1, 1, PL1_RW),
++    J273_CPREG_DEF(ARM64_REG_VMSA_LOCK_EL1, 3, 4, 15, 1, 2, PL1_RW),
++    J273_CPREG_DEF(APRR_EL0, 3, 4, 15, 2, 0, PL1_RW),
++    J273_CPREG_DEF(APRR_EL1, 3, 4, 15, 2, 1, PL1_RW),
++    J273_CPREG_DEF(CTRR_LOCK, 3, 4, 15, 2, 2, PL1_RW),
++    J273_CPREG_DEF(CTRR_A_LWR_EL1, 3, 4, 15, 2, 3, PL1_RW),
++    J273_CPREG_DEF(CTRR_A_UPR_EL1, 3, 4, 15, 2, 4, PL1_RW),
++    J273_CPREG_DEF(CTRR_CTL_EL1, 3, 4, 15, 2, 5, PL1_RW),
++    J273_CPREG_DEF(APRR_MASK_EN_EL1, 3, 4, 15, 2, 6, PL1_RW),
++    J273_CPREG_DEF(APRR_MASK_EL0, 3, 4, 15, 2, 7, PL1_RW),
++    J273_CPREG_DEF(ACC_CTRR_A_LWR_EL2, 3, 4, 15, 11, 0, PL1_RW),
++    J273_CPREG_DEF(ACC_CTRR_A_UPR_EL2, 3, 4, 15, 11, 1, PL1_RW),
++    J273_CPREG_DEF(ACC_CTRR_CTL_EL2, 3, 4, 15, 11, 4, PL1_RW),
++    J273_CPREG_DEF(ACC_CTRR_LOCK_EL2, 3, 4, 15, 11, 5, PL1_RW),
++    J273_CPREG_DEF(ARM64_REG_CYC_CFG, 3, 5, 15, 4, 0, PL1_RW),
++    J273_CPREG_DEF(ARM64_REG_CYC_OVRD, 3, 5, 15, 5, 0, PL1_RW),
++    J273_CPREG_DEF(IPI_SR, 3, 5, 15, 1, 1, PL1_RW),
++    J273_CPREG_DEF(UPMCR0, 3, 7, 15, 0, 4, PL1_RW),
++    J273_CPREG_DEF(UPMPCM, 3, 7, 15, 5, 4, PL1_RW),
++#endif
++
++    // Aleph-specific registers for communicating with QEMU
++
++    // REG_QEMU_CALL:
++    { .cp = CP_REG_ARM64_SYSREG_CP, .name = "REG_QEMU_CALL",
++      .opc0 = 3, .opc1 = 3, .crn = 15, .crm = 15, .opc2 = 0,
++      .access = PL0_RW, .type = ARM_CP_IO, .state = ARM_CP_STATE_AA64,
++      .readfn = qemu_call_status,
++      .writefn = qemu_call },
++
++    REGINFO_SENTINEL,
++};
++
++static uint32_t g_nop_inst = NOP_INST;
++static uint32_t g_ret_inst = RET_INST;
++static uint32_t g_mov_w0_01_inst = MOV_W0_01_INST;
++static uint32_t g_compare_true_inst = CMP_X9_x9_INST;
++static uint32_t g_w7_zero_inst = W7_ZERO_INST;
++static uint32_t g_w10_zero_inst = W10_ZERO_INST;
++static uint32_t g_w23_zero_inst = W23_ZERO_INST;
++static uint32_t g_orr_x0_2_inst = ORR_X0_2_INST;
++static uint32_t g_set_cpacr_and_branch_inst[] = {
++    //  91400c21       add x1, x1, 3, lsl 12    # x1 = x1 + 0x3000
++    //  d378dc21       lsl x1, x1, 8            # x1 = x1 * 0x100 (x1 = 0x300000)
++    //  d5181041       msr cpacr_el1, x1        # cpacr_el1 = x1 (enable FP)
++    //  d2800041       mov x1, #2
++    //  d51cf081       mov apctl_el1, x1
++    //  aa1f03e1       mov x1, xzr              # x1 = 0
++    //  14000eb5       b 0x1fc0                 # branch to regular start
++    0x91400c21, 0xd378dc21, 0xd5181041,
++    0xd2800041, 0xd51cf081, 0xaa1f03e1,
++    0x14000eb5
++};
++static uint32_t g_bzero_branch_unconditionally_inst = 0x14000039;
++static uint32_t g_qemu_call = 0xd51bff1f;
++
++typedef struct darwin_patch {
++    uint64_t addr;
++    uint32_t *inst;
++    uint32_t len;
++} darwin_patch;
++
++typedef struct darwin_kernel_patch {
++    const char *darwin_str;
++    uint32_t num_patches;
++    struct darwin_patch patches[];
++} darwin_kernel_patch;
++
++// Patch is a single instruction
++#define DARWIN_PATCH(offset, instruction) \
++{ .addr = offset, .inst = &instruction, .len = sizeof(instruction) }
++
++// Patch is an array of instructions
++#define DARWIN_PATCH_A(offset, instruction) \
++{ .addr = offset, .inst = instruction, .len = sizeof(instruction) }
++
++struct darwin_kernel_patch darwin_patches_20A5364e = {
++    .darwin_str =
++        "Darwin Kernel Version 20.0.0: Sun Jun 14 21:36:36 PDT 2020; "
++        "root:Bridge_xnu-7090.111.5.2~1/RELEASE_ARM64_T8020",
++    .num_patches = 6, .patches = {
++        DARWIN_PATCH_A(0xfffffe00079f0580, g_set_cpacr_and_branch_inst), // initial branch
++        DARWIN_PATCH(0xfffffe00079e49fc, g_bzero_branch_unconditionally_inst), // bzero conditional branch
++        DARWIN_PATCH(0xfffffe0007f8330c, g_w23_zero_inst), // parse_machfile slide set instruction
++        DARWIN_PATCH(0xfffffe0007a5b47c, g_qemu_call), // notify kernel task pointer
++        DARWIN_PATCH(0xfffffe0008af5e3c, g_mov_w0_01_inst), // core trust check
++        DARWIN_PATCH(0xfffffe0007f83108, g_nop_inst), // load_machfile: disable IMGPF_NOJOP
++    }
++};
++
++struct darwin_kernel_patch darwin_patches_20B5012d = {
++    .darwin_str =
++        "Darwin Kernel Version 20.1.0: Sat Oct 24 21:20:41 PDT 2020; "
++        "root:xnu-7195.50.3.201.1~1/RELEASE_ARM64_T8020",
++    .num_patches = 6, .patches = {
++        DARWIN_PATCH_A(0xfffffe0007ab0580, g_set_cpacr_and_branch_inst), // initial branch
++        DARWIN_PATCH(0xfffffe0007aa49fc, g_bzero_branch_unconditionally_inst), // bzero conditional branch
++        DARWIN_PATCH(0xfffffe0008056168, g_w10_zero_inst), // parse_machfile slide set instruction
++        DARWIN_PATCH(0xfffffe0007b1f4d8, g_qemu_call), // notify kernel task pointer
++        DARWIN_PATCH(0xfffffe0008c96538, g_mov_w0_01_inst), // core trust check
++        DARWIN_PATCH(0xfffffe0008055f64, g_nop_inst), // load_machfile: disable IMGPF_NOJOP
++    }
++};
++
++struct darwin_kernel_patch darwin_patches_20C69 = {
++    .darwin_str =
++        "Darwin Kernel Version 20.2.0: Wed Dec  2 20:40:22 PST 2020; "
++        "root:xnu-7195.60.75~1/RELEASE_ARM64_T8020",
++    .num_patches = 5, .patches = {
++        DARWIN_PATCH_A(0xfffffe0007ac4580, g_set_cpacr_and_branch_inst), // initial branch
++        DARWIN_PATCH(0xfffffe0007ab8a3c, g_bzero_branch_unconditionally_inst), // bzero conditional branch
++        DARWIN_PATCH(0xfffffe000806b438, g_w10_zero_inst), // parse_machfile slide set instruction
++        DARWIN_PATCH(0xfffffe0008cb6538, g_mov_w0_01_inst), // core trust check
++        DARWIN_PATCH(0xfffffe000806b234, g_nop_inst), // load_machfile: disable IMGPF_NOJOP
++    }
++};
++
++struct darwin_kernel_patch *darwin_patches[] = {
++    &darwin_patches_20A5364e,
++    &darwin_patches_20B5012d,
++    &darwin_patches_20C69,
++};
++
++static void j273_add_cpregs(J273MachineState *nms)
++{
++    ARMCPU *cpu = nms->cpu;
++
++    nms->J273_CPREG_VAR_NAME(ARM64_REG_EHID1) = 0;
++    nms->J273_CPREG_VAR_NAME(ARM64_REG_EHID10) = 0;
++    nms->J273_CPREG_VAR_NAME(ARM64_REG_EHID4) = 0;
++    nms->J273_CPREG_VAR_NAME(ARM64_REG_HID11) = 0;
++    nms->J273_CPREG_VAR_NAME(ARM64_REG_HID3) = 0;
++    nms->J273_CPREG_VAR_NAME(ARM64_REG_HID5) = 0;
++    nms->J273_CPREG_VAR_NAME(ARM64_REG_HID8) = 0;
++    nms->J273_CPREG_VAR_NAME(ARM64_REG_HID7) = 0;
++    nms->J273_CPREG_VAR_NAME(ARM64_REG_LSU_ERR_STS) = 0;
++    nms->J273_CPREG_VAR_NAME(PMC0) = 0;
++    nms->J273_CPREG_VAR_NAME(PMC1) = 0;
++    nms->J273_CPREG_VAR_NAME(PMCR1) = 0;
++    nms->J273_CPREG_VAR_NAME(PMSR) = 0;
++    nms->J273_CPREG_VAR_NAME(L2ACTLR_EL1) = 0;
++#ifdef ENABLE_EL2_REGS
++    nms->J273_CPREG_VAR_NAME(ARM64_REG_MIGSTS_EL1) = 0;
++    nms->J273_CPREG_VAR_NAME(ARM64_REG_KERNELKEYLO_EL1) = 0;
++    nms->J273_CPREG_VAR_NAME(ARM64_REG_KERNELKEYHI_EL1) = 0;
++    nms->J273_CPREG_VAR_NAME(ARM64_REG_VMSA_LOCK_EL1) = 0;
++    nms->J273_CPREG_VAR_NAME(APRR_EL0) = 0;
++    nms->J273_CPREG_VAR_NAME(APRR_EL1) = 0;
++    nms->J273_CPREG_VAR_NAME(CTRR_LOCK) = 0;
++    nms->J273_CPREG_VAR_NAME(CTRR_A_LWR_EL1) = 0;
++    nms->J273_CPREG_VAR_NAME(CTRR_A_UPR_EL1) = 0;
++    nms->J273_CPREG_VAR_NAME(CTRR_CTL_EL1) = 0;
++    nms->J273_CPREG_VAR_NAME(APRR_MASK_EN_EL1) = 0;
++    nms->J273_CPREG_VAR_NAME(APRR_MASK_EL0) = 0;
++    nms->J273_CPREG_VAR_NAME(ACC_CTRR_A_LWR_EL2) = 0;
++    nms->J273_CPREG_VAR_NAME(ACC_CTRR_A_UPR_EL2) = 0;
++    nms->J273_CPREG_VAR_NAME(ACC_CTRR_CTL_EL2) = 0;
++    nms->J273_CPREG_VAR_NAME(ACC_CTRR_LOCK_EL2) = 0;
++    nms->J273_CPREG_VAR_NAME(ARM64_REG_CYC_CFG) = 0;
++    nms->J273_CPREG_VAR_NAME(ARM64_REG_CYC_OVRD) = 0;
++    nms->J273_CPREG_VAR_NAME(UPMCR0) = 0;
++    nms->J273_CPREG_VAR_NAME(UPMPCM) = 0;
++#endif
++
++    if (kvm_enabled()) {
++        define_arm_cp_regs_with_opaque(cpu, j273_cp_reginfo_kvm, nms);
++    } else {
++        define_arm_cp_regs_with_opaque(cpu, j273_cp_reginfo_tcg, nms);
++    }
++}
++
++static void j273_create_s3c_uart(const J273MachineState *nms, Chardev *chr)
++{
++    qemu_irq irq;
++    DeviceState *d;
++    SysBusDevice *s;
++    hwaddr base = nms->uart_mmio_pa;
++
++    //hack for now. create a device that is not used just to have a dummy
++    //unused interrupt
++    d = qdev_new(TYPE_PLATFORM_BUS_DEVICE);
++    s = SYS_BUS_DEVICE(d);
++    sysbus_init_irq(s, &irq);
++    //pass a dummy irq as we don't need nor want interrupts for this UART
++    DeviceState *dev = exynos4210_uart_create(base, 256, 0, chr, irq);
++    if (!dev) {
++        abort();
++    }
++}
++
++static void j273_patch_kernel(AddressSpace *nsas, char *darwin_ver)
++{
++    bool found = false;
++    darwin_patch *patch;
++    darwin_kernel_patch *kernel_patch;
++    for (int i = 0; i < sizeof(darwin_patches) / sizeof(uint64_t); i++) {
++        kernel_patch = darwin_patches[i];
++        if (!strncmp(darwin_ver, kernel_patch->darwin_str, 1024)) {
++            for (int a = 0; a < kernel_patch->num_patches; a++) {
++                patch = &kernel_patch->patches[a];
++                address_space_rw(nsas, vtop_static(patch->addr),
++                        MEMTXATTRS_UNSPECIFIED, (uint8_t *)patch->inst,
++                        patch->len, 1);
++            }
++            found = true;
++        }
++    }
++    if (found == false) {
++        printf("No support for %s\n", darwin_ver);
++        abort();
++    }
++}
++
++static void j273_ns_memory_setup(MachineState *machine, MemoryRegion *sysmem,
++                                AddressSpace *nsas)
++{
++    uint64_t used_ram_for_blobs = 0;
++    hwaddr kernel_low;
++    hwaddr kernel_high;
++    hwaddr virt_base;
++    hwaddr dtb_va;
++    uint64_t dtb_size;
++    hwaddr kbootargs_pa;
++    hwaddr top_of_kernel_data_pa;
++    hwaddr mem_size;
++    hwaddr remaining_mem_size;
++    hwaddr allocated_ram_pa;
++    hwaddr phys_ptr;
++    hwaddr phys_pc;
++    hwaddr ramfb_pa = 0;
++    video_boot_args v_bootargs = {0};
++    J273MachineState *nms = J273_MACHINE(machine);
++    char darwin_ver[1024];
++
++    //setup the memory layout:
++
++    //At the beginning of the non-secure ram we have the raw kernel file.
++    //After that we have the static trust cache.
++    //After that we have all the kernel sections.
++    //After that we have ramdosk
++    //After that we have the device tree
++    //After that we have the kernel boot args
++    //After that we have the rest of the RAM
++
++    macho_file_highest_lowest_base(nms->kernel_filename, J273_PHYS_BASE,
++                                   &virt_base, &kernel_low, &kernel_high);
++
++    g_virt_base = virt_base;
++    g_phys_base = J273_PHYS_BASE;
++    phys_ptr = J273_PHYS_BASE;
++
++    //now account for the loaded kernel
++    arm_load_macho(nms->kernel_filename, nsas, sysmem, "kernel.j273",
++                    J273_PHYS_BASE, virt_base, kernel_low,
++                    kernel_high, &phys_pc, darwin_ver);
++    nms->kpc_pa = phys_pc;
++    used_ram_for_blobs += (align_64k_high(kernel_high) - kernel_low);
++
++    j273_patch_kernel(nsas, darwin_ver);
++
++    phys_ptr = align_64k_high(vtop_static(kernel_high));
++
++    //now account for the ramdisk
++    nms->ramdisk_file_dev.pa = 0;
++    hwaddr ramdisk_size = 0;
++    if (0 != nms->ramdisk_filename[0]) {
++        nms->ramdisk_file_dev.pa = phys_ptr;
++        macho_map_raw_file(nms->ramdisk_filename, nsas, sysmem,
++                           "ramdisk_raw_file.j273", nms->ramdisk_file_dev.pa,
++                           &nms->ramdisk_file_dev.size);
++        ramdisk_size = nms->ramdisk_file_dev.size;
++        phys_ptr += align_64k_high(nms->ramdisk_file_dev.size);
++    }
++
++    //now account for device tree
++    macho_load_dtb(nms->dtb_filename, nsas, sysmem, "dtb.j273", phys_ptr,
++                   &dtb_size, nms->ramdisk_file_dev.pa,
++                   ramdisk_size, &nms->uart_mmio_pa);
++    dtb_va = ptov_static(phys_ptr);
++    phys_ptr += align_64k_high(dtb_size);
++    used_ram_for_blobs += align_64k_high(dtb_size);
++
++    //now account for kernel boot args
++    used_ram_for_blobs += align_64k_high(sizeof(struct xnu_arm64_boot_args));
++    kbootargs_pa = phys_ptr;
++    nms->kbootargs_pa = kbootargs_pa;
++    phys_ptr += align_64k_high(sizeof(struct xnu_arm64_boot_args));
++    nms->extra_data_pa = phys_ptr;
++    allocated_ram_pa = phys_ptr;
++
++    if (nms->use_ramfb){
++        ramfb_pa = ((hwaddr)&((AllocatedData *)nms->extra_data_pa)->ramfb[0]);
++        xnu_define_ramfb_device(nsas,ramfb_pa);
++        xnu_get_video_bootargs(&v_bootargs, ramfb_pa);
++    }
++
++    phys_ptr += align_64k_high(sizeof(AllocatedData));
++    top_of_kernel_data_pa = phys_ptr;
++    remaining_mem_size = machine->ram_size - used_ram_for_blobs;
++    mem_size = allocated_ram_pa - J273_PHYS_BASE + remaining_mem_size;
++    macho_setup_bootargs("k_bootargs.j273", nsas, sysmem, kbootargs_pa,
++                         virt_base, J273_PHYS_BASE, mem_size,
++                         top_of_kernel_data_pa, dtb_va, dtb_size,
++                         v_bootargs, nms->kern_args);
++
++    allocate_ram(sysmem, "j273.ram", allocated_ram_pa, remaining_mem_size);
++}
++
++static void j273_memory_setup(MachineState *machine,
++                             MemoryRegion *sysmem,
++                             MemoryRegion *secure_sysmem,
++                             AddressSpace *nsas)
++{
++    j273_ns_memory_setup(machine, sysmem, nsas);
++}
++
++static void j273_cpu_setup(MachineState *machine, MemoryRegion **sysmem,
++                          MemoryRegion **secure_sysmem, ARMCPU **cpu,
++                          AddressSpace **nsas)
++{
++    Object *cpuobj = object_new(machine->cpu_type);
++    *cpu = ARM_CPU(cpuobj);
++    CPUState *cs = CPU(*cpu);
++
++    *sysmem = get_system_memory();
++
++    object_property_set_link(cpuobj, "memory",
++                             OBJECT(*sysmem), &error_abort);
++
++    //set secure monitor to false
++    object_property_set_bool(cpuobj, "has_el3", false, NULL);
++
++    object_property_set_bool(cpuobj, "has_el2", false, NULL);
++
++    object_property_set_bool(cpuobj, "realized", true, &error_fatal);
++
++    *nsas = cpu_get_address_space(cs, ARMASIdx_NS);
++
++    object_unref(cpuobj);
++    //currently support only a single CPU and thus
++    //use no interrupt controller and wire IRQs from devices directly to the CPU
++}
++
++static void j273_bootargs_setup(MachineState *machine)
++{
++    J273MachineState *nms = J273_MACHINE(machine);
++    nms->bootinfo.firmware_loaded = true;
++}
++
++static void j273_cpu_reset(void *opaque)
++{
++    J273MachineState *nms = J273_MACHINE((MachineState *)opaque);
++    ARMCPU *cpu = nms->cpu;
++    CPUState *cs = CPU(cpu);
++    CPUARMState *env = &cpu->env;
++
++    cpu_reset(cs);
++
++    env->xregs[0] = nms->kbootargs_pa;
++    env->pc = nms->kpc_pa;
++}
++
++//hooks arg is expected like this:
++//"hookfilepath@va@scratch_reg#hookfilepath@va@scratch_reg#..."
++
++static void j273_machine_init_hook_funcs(J273MachineState *nms,
++                                        AddressSpace *nsas)
++{
++    AllocatedData *allocated_data = (AllocatedData *)nms->extra_data_pa;
++    uint64_t i = 0;
++    char *orig_pos = NULL;
++    size_t orig_len = 0;
++    char *pos = NULL;
++    char *next_pos = NULL;
++    size_t len = 0;
++    char *elem = NULL;
++    char *next_elem = NULL;
++    size_t elem_len = 0;
++    char *end;
++
++    //ugly solution but a simple one for now, use this memory which is fixed at
++    //(pa: 0x0000000049BF4C00 va: 0xFFFFFFF009BF4C00) for globals to be common
++    //between drivers/hooks. Please adjust address if anything changes in
++    //the layout of the memory the "boot loader" sets up
++    uint64_t zero_var = 0;
++    address_space_rw(nsas, (hwaddr)&allocated_data->hook_globals[0],
++                     MEMTXATTRS_UNSPECIFIED, (uint8_t *)&zero_var,
++                     sizeof(zero_var), 1);
++
++    nms->hook_funcs_count = 0;
++
++    pos = &nms->hook_funcs_cfg[0];
++    if ((NULL == pos) || (0 == strlen(pos))) {
++        //fprintf(stderr, "no function hooks configured\n");
++        return;
++    }
++
++    orig_pos = pos;
++    orig_len = strlen(pos);
++
++    do {
++        next_pos = memchr(pos, '#', strlen(pos));
++        if (NULL != next_pos) {
++            len = next_pos - pos;
++        } else {
++            len = strlen(pos);
++        }
++
++        elem = pos;
++        next_elem = memchr(elem, '@', len);
++        if (NULL == next_elem) {
++            fprintf(stderr, "hook[%lu] failed to find '@' in %s\n", i, elem);
++            abort();
++        }
++        elem_len = next_elem - elem;
++        elem[elem_len] = 0;
++
++        uint8_t *code = NULL;
++        size_t size = 0;
++        if (!g_file_get_contents(elem, (char **)&code, &size, NULL)) {
++            fprintf(stderr, "hook[%lu] failed to read filepath: %s\n",
++                    i, elem);
++            abort();
++        }
++
++        elem += elem_len + 1;
++        next_elem = memchr(elem, '@', len);
++        if (NULL == next_elem) {
++            fprintf(stderr, "hook[%lu] failed to find '@' in %s\n", i, elem);
++            abort();
++        }
++        elem_len = next_elem - elem;
++        elem[elem_len] = 0;
++
++        nms->hook_funcs[i].va = strtoull(elem, &end, 16);
++        nms->hook_funcs[i].pa = vtop_static(nms->hook_funcs[i].va);
++        nms->hook_funcs[i].buf_va =
++                   ptov_static((hwaddr)&allocated_data->hook_funcs_code[i][0]);
++        nms->hook_funcs[i].buf_pa =
++                                (hwaddr)&allocated_data->hook_funcs_code[i][0];
++        nms->hook_funcs[i].buf_size = HOOK_CODE_ALLOC_SIZE;
++        nms->hook_funcs[i].code = (uint8_t *)code;
++        nms->hook_funcs[i].code_size = size;
++
++        elem += elem_len + 1;
++        if (NULL != next_pos) {
++            elem_len = next_pos - elem;
++        } else {
++            elem_len = strlen(elem);
++        }
++        elem[elem_len] = 0;
++
++        nms->hook_funcs[i].scratch_reg = (uint8_t)strtoul(elem, &end, 10);
++
++        i++;
++        pos += len + 1;
++    } while ((NULL != pos) && (pos < (orig_pos + orig_len)));
++
++    nms->hook_funcs_count = i;
++}
++
++static void j273_machine_init(MachineState *machine)
++{
++    J273MachineState *nms = J273_MACHINE(machine);
++    MemoryRegion *sysmem;
++    MemoryRegion *secure_sysmem;
++    AddressSpace *nsas;
++    ARMCPU *cpu;
++    CPUState *cs;
++    DeviceState *cpudev;
++
++    j273_cpu_setup(machine, &sysmem, &secure_sysmem, &cpu, &nsas);
++
++    nms->cpu = cpu;
++
++    j273_memory_setup(machine, sysmem, secure_sysmem, nsas);
++
++    cpudev = DEVICE(cpu);
++    cs = CPU(cpu);
++    AllocatedData *allocated_data = (AllocatedData *)nms->extra_data_pa;
++
++    if (0 != nms->driver_filename[0]) {
++        xnu_hook_tr_setup(nsas, cpu);
++        uint8_t *code = NULL;
++        unsigned long size;
++        if (!g_file_get_contents(nms->driver_filename, (char **)&code,
++                                 &size, NULL)) {
++            abort();
++        }
++        nms->hook.va = UBC_INIT_VADDR_16B92;
++        nms->hook.pa = vtop_static(UBC_INIT_VADDR_16B92);
++        nms->hook.buf_va =
++                        ptov_static((hwaddr)&allocated_data->hook_code[0]);
++        nms->hook.buf_pa = (hwaddr)&allocated_data->hook_code[0];
++        nms->hook.buf_size = HOOK_CODE_ALLOC_SIZE;
++        nms->hook.code = (uint8_t *)code;
++        nms->hook.code_size = size;
++        nms->hook.scratch_reg = 2;
++    }
++
++    if (0 != nms->qc_file_0_filename[0]) {
++        qc_file_open(0, &nms->qc_file_0_filename[0]);
++    }
++
++    if (0 != nms->qc_file_1_filename[0]) {
++        qc_file_open(1, &nms->qc_file_1_filename[0]);
++    }
++
++    if (0 != nms->qc_file_log_filename[0]) {
++        qc_file_open(2, &nms->qc_file_log_filename[0]);
++    }
++
++    j273_machine_init_hook_funcs(nms, nsas);
++
++    j273_add_cpregs(nms);
++
++    j273_create_s3c_uart(nms, serial_hd(0));
++
++    //wire timer to FIQ as expected by Apple's SoCs
++    qdev_connect_gpio_out(cpudev, GTIMER_VIRT,
++                          qdev_get_gpio_in(cpudev, ARM_CPU_FIQ));
++
++    j273_bootargs_setup(machine);
++
++    qemu_register_reset(j273_cpu_reset, nms);
++}
++
++static void j273_set_ramdisk_filename(Object *obj, const char *value,
++                                     Error **errp)
++{
++    J273MachineState *nms = J273_MACHINE(obj);
++
++    g_strlcpy(nms->ramdisk_filename, value, sizeof(nms->ramdisk_filename));
++}
++
++static char *j273_get_ramdisk_filename(Object *obj, Error **errp)
++{
++    J273MachineState *nms = J273_MACHINE(obj);
++    return g_strdup(nms->ramdisk_filename);
++}
++
++static void j273_set_kernel_filename(Object *obj, const char *value,
++                                     Error **errp)
++{
++    J273MachineState *nms = J273_MACHINE(obj);
++
++    g_strlcpy(nms->kernel_filename, value, sizeof(nms->kernel_filename));
++}
++
++static char *j273_get_kernel_filename(Object *obj, Error **errp)
++{
++    J273MachineState *nms = J273_MACHINE(obj);
++    return g_strdup(nms->kernel_filename);
++}
++
++static void j273_set_dtb_filename(Object *obj, const char *value,
++                                     Error **errp)
++{
++    J273MachineState *nms = J273_MACHINE(obj);
++
++    g_strlcpy(nms->dtb_filename, value, sizeof(nms->dtb_filename));
++}
++
++static char *j273_get_dtb_filename(Object *obj, Error **errp)
++{
++    J273MachineState *nms = J273_MACHINE(obj);
++    return g_strdup(nms->dtb_filename);
++}
++
++static void j273_set_kern_args(Object *obj, const char *value,
++                                     Error **errp)
++{
++    J273MachineState *nms = J273_MACHINE(obj);
++
++    g_strlcpy(nms->kern_args, value, sizeof(nms->kern_args));
++}
++
++static char *j273_get_kern_args(Object *obj, Error **errp)
++{
++    J273MachineState *nms = J273_MACHINE(obj);
++    return g_strdup(nms->kern_args);
++}
++
++static void j273_set_tunnel_port(Object *obj, const char *value,
++                                     Error **errp)
++{
++    J273MachineState *nms = J273_MACHINE(obj);
++    nms->tunnel_port = atoi(value);
++}
++
++static char *j273_get_tunnel_port(Object *obj, Error **errp)
++{
++    char buf[128];
++    J273MachineState *nms = J273_MACHINE(obj);
++    snprintf(buf, 128, "%d", nms->tunnel_port);
++    return g_strdup(buf);
++}
++
++static void j273_set_hook_funcs(Object *obj, const char *value, Error **errp)
++{
++    J273MachineState *nms = J273_MACHINE(obj);
++
++    g_strlcpy(nms->hook_funcs_cfg, value, sizeof(nms->hook_funcs_cfg));
++}
++
++static char *j273_get_hook_funcs(Object *obj, Error **errp)
++{
++    J273MachineState *nms = J273_MACHINE(obj);
++    return g_strdup(nms->hook_funcs_cfg);
++}
++
++static void j273_set_driver_filename(Object *obj, const char *value,
++                                    Error **errp)
++{
++    J273MachineState *nms = J273_MACHINE(obj);
++
++    g_strlcpy(nms->driver_filename, value, sizeof(nms->driver_filename));
++}
++
++static char *j273_get_driver_filename(Object *obj, Error **errp)
++{
++    J273MachineState *nms = J273_MACHINE(obj);
++    return g_strdup(nms->driver_filename);
++}
++
++static void j273_set_qc_file_0_filename(Object *obj, const char *value,
++                                       Error **errp)
++{
++    J273MachineState *nms = J273_MACHINE(obj);
++
++    g_strlcpy(nms->qc_file_0_filename, value, sizeof(nms->qc_file_0_filename));
++}
++
++static char *j273_get_qc_file_0_filename(Object *obj, Error **errp)
++{
++    J273MachineState *nms = J273_MACHINE(obj);
++    return g_strdup(nms->qc_file_0_filename);
++}
++
++static void j273_set_qc_file_1_filename(Object *obj, const char *value,
++                                       Error **errp)
++{
++    J273MachineState *nms = J273_MACHINE(obj);
++
++    g_strlcpy(nms->qc_file_1_filename, value, sizeof(nms->qc_file_1_filename));
++}
++
++static char *j273_get_qc_file_1_filename(Object *obj, Error **errp)
++{
++    J273MachineState *nms = J273_MACHINE(obj);
++    return g_strdup(nms->qc_file_1_filename);
++}
++
++static void j273_set_qc_file_log_filename(Object *obj, const char *value,
++                                       Error **errp)
++{
++    J273MachineState *nms = J273_MACHINE(obj);
++
++    g_strlcpy(nms->qc_file_log_filename, value,
++              sizeof(nms->qc_file_log_filename));
++}
++
++static char *j273_get_qc_file_log_filename(Object *obj, Error **errp)
++{
++    J273MachineState *nms = J273_MACHINE(obj);
++    return g_strdup(nms->qc_file_log_filename);
++}
++
++static void j273_set_xnu_ramfb(Object *obj, const char *value,
++                                       Error **errp)
++{
++    J273MachineState *nms = J273_MACHINE(obj);
++    if (strcmp(value,"on") == 0)
++        nms->use_ramfb = true;
++    else {
++        if (strcmp(value,"off") != 0)
++            fprintf(stderr,"NOTE: the value of xnu-ramfb is not valid,\
++the framebuffer will be disabled.\n");
++        nms->use_ramfb = false;
++    }
++}
++
++static char* j273_get_xnu_ramfb(Object *obj, Error **errp)
++{
++    J273MachineState *nms = J273_MACHINE(obj);
++    if (nms->use_ramfb)
++        return g_strdup("on");
++    else
++        return g_strdup("off");
++}
++
++static void j273_instance_init(Object *obj)
++{
++    object_property_add_str(obj, "ramdisk-filename", j273_get_ramdisk_filename,
++                            j273_set_ramdisk_filename);
++    object_property_set_description(obj, "ramdisk-filename",
++                                    "Set the ramdisk filename to be loaded");
++
++    object_property_add_str(obj, "kernel-filename", j273_get_kernel_filename,
++                            j273_set_kernel_filename);
++    object_property_set_description(obj, "kernel-filename",
++                                    "Set the kernel filename to be loaded");
++
++    object_property_add_str(obj, "dtb-filename", j273_get_dtb_filename,
++                            j273_set_dtb_filename);
++    object_property_set_description(obj, "dtb-filename",
++                                    "Set the dev tree filename to be loaded");
++
++    object_property_add_str(obj, "kern-cmd-args", j273_get_kern_args,
++                            j273_set_kern_args);
++    object_property_set_description(obj, "kern-cmd-args",
++                                    "Set the XNU kernel cmd args");
++
++    object_property_add_str(obj, "tunnel-port", j273_get_tunnel_port,
++                            j273_set_tunnel_port);
++    object_property_set_description(obj, "tunnel-port",
++                                    "Set the port for the tunnel connection");
++
++    object_property_add_str(obj, "hook-funcs", j273_get_hook_funcs,
++                            j273_set_hook_funcs);
++    object_property_set_description(obj, "hook-funcs",
++                                    "Set the hook funcs to be loaded");
++
++    object_property_add_str(obj, "driver-filename", j273_get_driver_filename,
++                            j273_set_driver_filename);
++    object_property_set_description(obj, "driver-filename",
++                                    "Set the driver filename to be loaded");
++
++    object_property_add_str(obj, "qc-file-0-filename",
++                            j273_get_qc_file_0_filename,
++                            j273_set_qc_file_0_filename);
++    object_property_set_description(obj, "qc-file-0-filename",
++                                    "Set the qc file 0 filename to be loaded");
++
++    object_property_add_str(obj, "qc-file-1-filename",
++                            j273_get_qc_file_1_filename,
++                            j273_set_qc_file_1_filename);
++    object_property_set_description(obj, "qc-file-1-filename",
++                                    "Set the qc file 1 filename to be loaded");
++
++    object_property_add_str(obj, "qc-file-log-filename",
++                            j273_get_qc_file_log_filename,
++                            j273_set_qc_file_log_filename);
++    object_property_set_description(obj, "qc-file-log-filename",
++                                   "Set the qc file log filename to be loaded");
++
++    object_property_add_str(obj, "xnu-ramfb",
++                            j273_get_xnu_ramfb,
++                            j273_set_xnu_ramfb);
++    object_property_set_description(obj, "xnu-ramfb",
++                                    "Turn on the display framebuffer");
++
++}
++
++static void j273_machine_class_init(ObjectClass *klass, void *data)
++{
++    MachineClass *mc = MACHINE_CLASS(klass);
++    mc->desc = "macOS Big Sur Beta 6 (j273 - A12Z)";
++    mc->init = j273_machine_init;
++    mc->max_cpus = 1;
++    //this disables the error message "Failed to query for block devices!"
++    //when starting qemu - must keep at least one device
++    //mc->no_sdcard = 1;
++    mc->no_floppy = 1;
++    mc->no_cdrom = 1;
++    mc->no_parallel = 1;
++    mc->default_cpu_type = ARM_CPU_TYPE_NAME("cortex-a57");
++    mc->minimum_page_bits = 12;
++}
++
++static const TypeInfo j273_machine_info = {
++    .name          = TYPE_J273_MACHINE,
++    .parent        = TYPE_MACHINE,
++    .instance_size = sizeof(J273MachineState),
++    .class_size    = sizeof(J273MachineClass),
++    .class_init    = j273_machine_class_init,
++    .instance_init = j273_instance_init,
++};
++
++static void j273_machine_types(void)
++{
++    type_register_static(&j273_machine_info);
++}
++
++type_init(j273_machine_types)
+diff --git a/xnu-qemu-arm64-5.1.0/hw/arm/xnu.c b/xnu-qemu-arm64-5.1.0/hw/arm/xnu.c
+new file mode 100644
+index 0000000..70ffeaf
+--- /dev/null
++++ b/xnu-qemu-arm64-5.1.0/hw/arm/xnu.c
+@@ -0,0 +1,343 @@
++/*
++ *
++ * Copyright (c) 2019 Jonathan Afek <jonyafek@me.com>
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a copy
++ * of this software and associated documentation files (the "Software"), to deal
++ * in the Software without restriction, including without limitation the rights
++ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
++ * copies of the Software, and to permit persons to whom the Software is
++ * furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice shall be included in
++ * all copies or substantial portions of the Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
++ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
++ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
++ * THE SOFTWARE.
++ */
++
++#include "qemu/osdep.h"
++#include "qapi/error.h"
++#include "qemu-common.h"
++#include "hw/arm/boot.h"
++#include "sysemu/sysemu.h"
++#include "qemu/error-report.h"
++#include "hw/arm/xnu.h"
++#include "hw/loader.h"
++
++static void allocate_and_copy(MemoryRegion *mem, AddressSpace *as,
++                              const char *name, hwaddr pa, hwaddr size,
++                              void *buf)
++{
++    if (mem) {
++        allocate_ram(mem, name, pa, align_64k_high(size));
++    }
++    address_space_rw(as, pa, MEMTXATTRS_UNSPECIFIED, (uint8_t *)buf, size, 1);
++}
++
++void macho_load_dtb(char *filename, AddressSpace *as, MemoryRegion *mem,
++                    const char *name, hwaddr dtb_pa, uint64_t *size,
++                    hwaddr ramdisk_addr, hwaddr ramdisk_size,
++                    hwaddr *uart_mmio_pa)
++{
++    uint8_t *file_data = NULL;
++    unsigned long fsize;
++
++    if (g_file_get_contents(filename, (char **)&file_data, &fsize, NULL)) {
++        DTBNode *root = load_dtb(file_data);
++
++        //first fetch the uart mmio address
++        DTBNode *child = get_dtb_child_node_by_name(root, "arm-io");
++        if (NULL == child) {
++            abort();
++        }
++        DTBProp *prop = get_dtb_prop(child, "ranges");
++        if (NULL == prop) {
++            abort();
++        }
++        hwaddr *ranges = (hwaddr *)prop->value;
++        hwaddr soc_base_pa = ranges[1];
++        child = get_dtb_child_node_by_name(child, "uart0");
++        if (NULL == child) {
++            abort();
++        }
++        //make sure this node has the boot-console prop
++        prop = get_dtb_prop(child, "boot-console");
++        if (NULL == prop) {
++            abort();
++        }
++        prop = get_dtb_prop(child, "reg");
++        if (NULL == prop) {
++            abort();
++        }
++        hwaddr *uart_offset = (hwaddr *)prop->value;
++        if (NULL != uart_mmio_pa) {
++            *uart_mmio_pa = soc_base_pa + uart_offset[0];
++        }
++
++        child = get_dtb_child_node_by_name(root, "chosen");
++        child = get_dtb_child_node_by_name(child, "memory-map");
++        if (NULL == child) {
++            abort();
++        }
++
++        uint64_t memmap[2] = {0};
++
++        if ((0 != ramdisk_addr) && (0 != ramdisk_size)) {
++            memmap[0] = ramdisk_addr;
++            memmap[1] = ramdisk_size;
++            add_dtb_prop(child, "RAMDisk", sizeof(memmap),
++                    (uint8_t *)&memmap[0]);
++        }
++
++        uint64_t size_n = get_dtb_node_buffer_size(root);
++
++        uint8_t *buf = g_malloc0(size_n);
++        save_dtb(buf, root);
++
++        allocate_and_copy(mem, as, name, dtb_pa, size_n, buf);
++        g_free(file_data);
++        delete_dtb_node(root);
++        g_free(buf);
++        *size = size_n;
++    } else {
++        abort();
++    }
++}
++
++void macho_map_raw_file(const char *filename, AddressSpace *as, MemoryRegion *mem,
++                        const char *name, hwaddr file_pa, uint64_t *size)
++{
++    Error *err = NULL;
++    MemoryRegion *mr = NULL;
++    struct stat file_info;
++
++    if (stat(filename, &file_info)) {
++        fprintf(stderr, "Couldn't get file size for mmapping. Loading into RAM.\n");
++        goto load_fallback;
++    }
++
++    mr = g_new(MemoryRegion, 1);
++    *size = file_info.st_size;
++
++    memory_region_init_ram_from_file(mr, NULL, name, *size & (~0xffffUL), 0, 0, filename, &err);
++    if (err) {
++        error_report_err(err);
++        fprintf(stderr, "Couldn't mmap file. Loading into RAM.\n");
++        goto load_fallback;
++    }
++    memory_region_add_subregion(mem, file_pa, mr);
++    return;
++
++load_fallback:
++    if (mr) {
++        g_free(mr);
++    }
++    macho_load_raw_file(filename, as, mem, name, file_pa, size);
++}
++
++void macho_load_raw_file(const char *filename, AddressSpace *as, MemoryRegion *mem,
++                         const char *name, hwaddr file_pa, uint64_t *size)
++{
++    uint8_t* file_data = NULL;
++    unsigned long sizef;
++    if (g_file_get_contents(filename, (char **)&file_data, &sizef, NULL)) {
++        *size = sizef;
++        allocate_and_copy(mem, as, name, file_pa, *size, file_data);
++        g_free(file_data);
++    } else {
++        abort();
++    }
++}
++
++void macho_tz_setup_bootargs(const char *name, AddressSpace *as,
++                             MemoryRegion *mem, hwaddr bootargs_addr,
++                             hwaddr virt_base, hwaddr phys_base,
++                             hwaddr mem_size, hwaddr kern_args,
++                             hwaddr kern_entry, hwaddr kern_phys_base)
++{
++    struct xnu_arm64_monitor_boot_args boot_args;
++    memset(&boot_args, 0, sizeof(boot_args));
++    boot_args.version = xnu_arm64_kBootArgsVersion2;
++    boot_args.virtBase = virt_base;
++    boot_args.physBase = phys_base;
++    boot_args.memSize = mem_size;
++    boot_args.kernArgs = kern_args;
++    boot_args.kernEntry = kern_entry;
++    boot_args.kernPhysBase = kern_phys_base;
++
++    boot_args.kernPhysSlide = 0;
++    boot_args.kernVirtSlide = 0;
++
++    allocate_and_copy(mem, as, name, bootargs_addr, sizeof(boot_args),
++                      &boot_args);
++}
++
++void macho_setup_bootargs(const char *name, AddressSpace *as,
++                          MemoryRegion *mem, hwaddr bootargs_pa,
++                          hwaddr virt_base, hwaddr phys_base, hwaddr mem_size,
++                          hwaddr top_of_kernel_data_pa, hwaddr dtb_va,
++                          hwaddr dtb_size, video_boot_args v_bootargs,
++                          char *kern_args)
++{
++    struct xnu_arm64_boot_args boot_args;
++    memset(&boot_args, 0, sizeof(boot_args));
++    boot_args.Revision = xnu_arm64_kBootArgsRevision2;
++    boot_args.Version = xnu_arm64_kBootArgsVersion2;
++    boot_args.virtBase = virt_base;
++    boot_args.physBase = phys_base;
++    boot_args.memSize = mem_size;
++
++    boot_args.Video.v_baseAddr = v_bootargs.v_baseAddr;
++    boot_args.Video.v_depth = v_bootargs.v_depth;
++    boot_args.Video.v_display = v_bootargs.v_display;
++    boot_args.Video.v_height = v_bootargs.v_height;
++    boot_args.Video.v_rowBytes = v_bootargs.v_rowBytes;
++    boot_args.Video.v_width = v_bootargs.v_width;
++
++    boot_args.topOfKernelData = top_of_kernel_data_pa;
++    boot_args.deviceTreeP = dtb_va;
++    boot_args.deviceTreeLength = dtb_size;
++    boot_args.memSizeActual = 0;
++    if (kern_args) {
++        g_strlcpy(boot_args.CommandLine, kern_args,
++                  sizeof(boot_args.CommandLine));
++    }
++
++    allocate_and_copy(mem, as, name, bootargs_pa, sizeof(boot_args),
++                      &boot_args);
++}
++
++static void macho_highest_lowest(struct mach_header_64* mh, uint64_t *lowaddr,
++                                 uint64_t *highaddr)
++{
++    struct load_command* cmd = (struct load_command*)((uint8_t*)mh +
++                                                sizeof(struct mach_header_64));
++    // iterate all the segments once to find highest and lowest addresses
++    uint64_t low_addr_temp = ~0;
++    uint64_t high_addr_temp = 0;
++    for (unsigned int index = 0; index < mh->ncmds; index++) {
++        switch (cmd->cmd) {
++            case LC_SEGMENT_64: {
++                struct segment_command_64 *segCmd =
++                                        (struct segment_command_64 *)cmd;
++                if (segCmd->vmaddr < low_addr_temp) {
++                    low_addr_temp = segCmd->vmaddr;
++                }
++                if (segCmd->vmaddr + segCmd->vmsize > high_addr_temp) {
++                    high_addr_temp = segCmd->vmaddr + segCmd->vmsize;
++                }
++                break;
++            }
++        }
++        cmd = (struct load_command*)((char*)cmd + cmd->cmdsize);
++    }
++    *lowaddr = low_addr_temp;
++    *highaddr = high_addr_temp;
++}
++
++static void macho_file_highest_lowest(const char *filename, hwaddr *lowest,
++                                      hwaddr *highest)
++{
++    gsize len;
++    uint8_t *data = NULL;
++    if (!g_file_get_contents(filename, (char **)&data, &len, NULL)) {
++        abort();
++    }
++    struct mach_header_64* mh = (struct mach_header_64*)data;
++    macho_highest_lowest(mh, lowest, highest);
++    g_free(data);
++}
++
++void macho_file_highest_lowest_base(const char *filename, hwaddr phys_base,
++                                    hwaddr *virt_base, hwaddr *lowest,
++                                    hwaddr *highest)
++{
++    uint8_t high_Low_dif_bit_index;
++    uint8_t phys_base_non_zero_bit_index;
++    hwaddr bit_mask_for_index;
++
++    macho_file_highest_lowest(filename, lowest, highest);
++    high_Low_dif_bit_index =
++        get_highest_different_bit_index(align_64k_high(*highest),
++                                        align_64k_low(*lowest));
++    if (phys_base) {
++        phys_base_non_zero_bit_index =
++            get_lowest_non_zero_bit_index(phys_base);
++
++        //make sure we have enough zero bits to have all the diffrent kernel
++        //image addresses have the same non static bits in physical and in
++        //virtual memory.
++        if (high_Low_dif_bit_index > phys_base_non_zero_bit_index) {
++            abort();
++        }
++        bit_mask_for_index =
++            get_low_bits_mask_for_bit_index(phys_base_non_zero_bit_index);
++
++        *virt_base = align_64k_low(*lowest) & (~bit_mask_for_index);
++    }
++
++}
++
++void arm_load_macho(char *filename, AddressSpace *as, MemoryRegion *mem,
++                    const char *name, hwaddr phys_base, hwaddr virt_base,
++                    hwaddr low_virt_addr, hwaddr high_virt_addr, hwaddr *pc,
++                    char *darwin_ver)
++{
++    uint8_t *data = NULL;
++    gsize len;
++    uint8_t* rom_buf = NULL;
++
++    if (!g_file_get_contents(filename, (char **)&data, &len, NULL)) {
++        abort();
++    }
++
++    const char *darwin_str = "Darwin Kernel Version";
++    if (darwin_ver) {
++        char *res = memmem((char *)data, len, darwin_str,
++                sizeof(darwin_str));
++        if (!res)
++            abort();
++        strncpy(darwin_ver, res, strnlen(res, 1024) + 1);
++    }
++
++    struct mach_header_64* mh = (struct mach_header_64*)data;
++    struct load_command* cmd = (struct load_command*)(data +
++                                                sizeof(struct mach_header_64));
++
++    uint64_t rom_buf_size = align_64k_high(high_virt_addr) - low_virt_addr;
++    rom_buf = g_malloc0(rom_buf_size);
++    for (unsigned int index = 0; index < mh->ncmds; index++) {
++        switch (cmd->cmd) {
++            case LC_SEGMENT_64: {
++                struct segment_command_64 *segCmd =
++                                            (struct segment_command_64 *)cmd;
++                memcpy(rom_buf + (segCmd->vmaddr - low_virt_addr),
++                       data + segCmd->fileoff, segCmd->filesize);
++                break;
++            }
++            case LC_UNIXTHREAD: {
++                // grab just the entry point PC
++                uint64_t* ptrPc = (uint64_t*)((char*)cmd + 0x110);
++                // 0x110 for arm64 only.
++                *pc = vtop_bases(*ptrPc, phys_base, virt_base);
++                break;
++            }
++        }
++        cmd = (struct load_command*)((char*)cmd + cmd->cmdsize);
++    }
++    hwaddr low_phys_addr = vtop_bases(low_virt_addr, phys_base, virt_base);
++    allocate_and_copy(mem, as, name, low_phys_addr, rom_buf_size, rom_buf);
++
++    if (data) {
++        g_free(data);
++    }
++    if (rom_buf) {
++        g_free(rom_buf);
++    }
++}
+diff --git a/xnu-qemu-arm64-5.1.0/hw/arm/xnu_cpacr.c b/xnu-qemu-arm64-5.1.0/hw/arm/xnu_cpacr.c
+new file mode 100644
+index 0000000..18a85b3
+--- /dev/null
++++ b/xnu-qemu-arm64-5.1.0/hw/arm/xnu_cpacr.c
+@@ -0,0 +1,86 @@
++/*
++ *
++ * Copyright (c) 2019 Jonathan Afek <jonyafek@me.com>
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a copy
++ * of this software and associated documentation files (the "Software"), to deal
++ * in the Software without restriction, including without limitation the rights
++ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
++ * copies of the Software, and to permit persons to whom the Software is
++ * furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice shall be included in
++ * all copies or substantial portions of the Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
++ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
++ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
++ * THE SOFTWARE.
++ */
++
++#include "qemu/osdep.h"
++#include "qapi/error.h"
++#include "qemu-common.h"
++#include "hw/arm/boot.h"
++#include "sysemu/sysemu.h"
++#include "qemu/error-report.h"
++#include "hw/arm/xnu_cpacr.h"
++#include "hw/loader.h"
++
++static CpacrIntCtx ctx = {0};
++
++static void cpacr_a32_s_int_write(CPUARMState *env, const ARMCPRegInfo *ri,
++                                  uint64_t value)
++{
++    ctx.wfn_a32_s(env, ri, ctx.val);
++}
++
++static void cpacr_a32_s_int_reset(CPUARMState *env, const ARMCPRegInfo *ri)
++{
++    cpacr_a32_s_int_write(env, ri, ctx.val);
++}
++
++static void cpacr_a32_ns_int_write(CPUARMState *env, const ARMCPRegInfo *ri,
++                                   uint64_t value)
++{
++    ctx.wfn_a32_ns(env, ri, ctx.val);
++}
++
++static void cpacr_a32_ns_int_reset(CPUARMState *env, const ARMCPRegInfo *ri)
++{
++    cpacr_a32_ns_int_write(env, ri, ctx.val);
++}
++
++static void cpacr_a64_intercept_write(CPUARMState *env, const ARMCPRegInfo *ri,
++                                      uint64_t value)
++{
++    ctx.wfn_a64(env, ri, ctx.val);
++}
++
++static void cpacr_a64_intercept_reset(CPUARMState *env, const ARMCPRegInfo *ri)
++{
++    cpacr_a64_intercept_write(env, ri, ctx.val);
++}
++
++void xnu_cpacr_intercept_write_const_val(ARMCPU *cpu, uint64_t val)
++{
++    ctx.val = val;
++    uint32_t key = ENCODE_AA64_CP_REG(19, 1, 0, 3, 0, 2);
++    ARMCPRegInfo *ri = (ARMCPRegInfo *)get_arm_cp_reginfo(cpu->cp_regs, key);
++    ctx.wfn_a64 = ri->writefn;
++    ri->writefn = cpacr_a64_intercept_write;
++    ri->resetfn = cpacr_a64_intercept_reset;
++    key = ENCODE_CP_REG(15, 0, 1, 1, 0, 0, 2);
++    ri = (ARMCPRegInfo *)get_arm_cp_reginfo(cpu->cp_regs, key);
++    ctx.wfn_a32_ns = ri->writefn;
++    ri->writefn = cpacr_a32_ns_int_write;
++    ri->resetfn = cpacr_a32_ns_int_reset;
++    key = ENCODE_CP_REG(15, 0, 0, 1, 0, 0, 2);
++    ri = (ARMCPRegInfo *)get_arm_cp_reginfo(cpu->cp_regs, key);
++    ctx.wfn_a32_s = ri->writefn;
++    ri->writefn = cpacr_a32_s_int_write;
++    ri->resetfn = cpacr_a32_s_int_reset;
++}
+diff --git a/xnu-qemu-arm64-5.1.0/hw/arm/xnu_dtb.c b/xnu-qemu-arm64-5.1.0/hw/arm/xnu_dtb.c
+new file mode 100644
+index 0000000..e539a24
+--- /dev/null
++++ b/xnu-qemu-arm64-5.1.0/hw/arm/xnu_dtb.c
+@@ -0,0 +1,335 @@
++/*
++ *
++ * Copyright (c) 2019 Jonathan Afek <jonyafek@me.com>
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a copy
++ * of this software and associated documentation files (the "Software"), to deal
++ * in the Software without restriction, including without limitation the rights
++ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
++ * copies of the Software, and to permit persons to whom the Software is
++ * furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice shall be included in
++ * all copies or substantial portions of the Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
++ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
++ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
++ * THE SOFTWARE.
++ */
++
++#include "qemu/osdep.h"
++#include "qapi/error.h"
++#include "qemu-common.h"
++#include "hw/arm/boot.h"
++#include "sysemu/sysemu.h"
++#include "qemu/error-report.h"
++#include "hw/arm/xnu.h"
++#include "hw/loader.h"
++#include "hw/arm/xnu_dtb.h"
++
++static uint64_t align_4_high_num(uint64_t num)
++{
++    return (num + (4 - 1)) & ~(4 - 1);
++}
++
++static void *align_4_high_ptr(void *ptr)
++{
++    uint64_t num = align_4_high_num((uint64_t)ptr);
++    return (void *)num;
++}
++
++
++static DTBProp *read_dtb_prop(uint8_t **dtb_blob)
++{
++    if ((NULL == dtb_blob) || (NULL == *dtb_blob)) {
++        abort();
++    }
++    *dtb_blob = align_4_high_ptr(*dtb_blob);
++    DTBProp *prop = g_new0(DTBProp, 1);
++    memcpy(&prop->name[0], *dtb_blob, DTB_PROP_NAME_LEN);
++    *dtb_blob += DTB_PROP_NAME_LEN;
++    //zero out this flag which sometimes appears in the DT
++    //normally done by iboot
++    prop->length = *(uint32_t *)*dtb_blob & ~DT_PROP_FLAG_PLACEHOLDER;
++    *dtb_blob += sizeof(uint32_t);
++    if (0 != prop->length) {
++        prop->value = g_malloc0(prop->length);
++        if (NULL == prop->value) {
++            abort();
++        }
++        memcpy(&prop->value[0], *dtb_blob, prop->length);
++        *dtb_blob += prop->length;
++    }
++
++    return prop;
++}
++
++static void delete_prop(DTBProp *prop)
++{
++    if (NULL == prop) {
++        return;
++    }
++
++    if (NULL != prop->value) {
++        g_free(prop->value);
++    }
++
++    g_free(prop);
++}
++
++static DTBNode *read_dtb_node(uint8_t **dtb_blob)
++{
++    if ((NULL == dtb_blob) || (NULL == *dtb_blob)) {
++        abort();
++    }
++
++    uint32_t i = 0;
++
++    *dtb_blob = align_4_high_ptr(*dtb_blob);
++    DTBNode *node = g_new0(DTBNode, 1);
++    node->prop_count = *(uint32_t *)*dtb_blob;
++    *dtb_blob += sizeof(uint32_t);
++    node->child_node_count = *(uint32_t *)*dtb_blob;
++    *dtb_blob += sizeof(uint32_t);
++
++    if (0 == node->prop_count) {
++        abort();
++    }
++    for (i = 0; i < node->prop_count; i++) {
++        DTBProp *prop = read_dtb_prop(dtb_blob);
++        node->props = g_list_append(node->props, prop);
++    }
++    for (i = 0; i < node->child_node_count; i++) {
++        DTBNode *child = read_dtb_node(dtb_blob);
++        node->child_nodes = g_list_append(node->child_nodes, child);
++    }
++    return node;
++}
++
++void delete_dtb_node(DTBNode *node)
++{
++    if (NULL == node) {
++        return;
++    }
++    if (NULL != node->props) {
++        g_list_free_full(node->props, (GDestroyNotify)delete_prop);
++    }
++    if (NULL != node->child_nodes) {
++        g_list_free_full(node->child_nodes, (GDestroyNotify)delete_dtb_node);
++    }
++    g_free(node);
++}
++
++DTBNode *load_dtb(uint8_t *dtb_blob)
++{
++    DTBNode *root = read_dtb_node(&dtb_blob);
++    return root;
++}
++
++static void save_prop(DTBProp *prop, uint8_t **buf)
++{
++    if ((NULL == prop) || (NULL == buf) || (NULL ==*buf)) {
++        abort();
++    }
++
++    *buf = align_4_high_ptr(*buf);
++    memcpy(*buf, &prop->name[0], DTB_PROP_NAME_LEN);
++    *buf += DTB_PROP_NAME_LEN;
++    memcpy(*buf, &prop->length, sizeof(uint32_t));
++    *buf += sizeof(uint32_t);
++    memcpy(*buf, prop->value, prop->length);
++    *buf += prop->length;
++}
++
++static void save_node(DTBNode *node, uint8_t **buf)
++{
++    if ((NULL == node) || (NULL == buf) || (NULL ==*buf)) {
++        abort();
++    }
++
++    *buf = align_4_high_ptr(*buf);
++
++    memcpy(*buf, &node->prop_count, sizeof(uint32_t));
++    *buf += sizeof(uint32_t);
++    memcpy(*buf, &node->child_node_count, sizeof(uint32_t));
++    *buf += sizeof(uint32_t);
++    g_list_foreach(node->props, (GFunc)save_prop, buf);
++    g_list_foreach(node->child_nodes, (GFunc)save_node, buf);
++}
++
++void remove_dtb_prop(DTBNode *node, DTBProp *prop)
++{
++    if ((NULL == node) || (NULL == prop)) {
++        abort();
++    }
++    GList *iter;
++    bool found = false;
++    for (iter = node->props; iter != NULL; iter = iter->next) {
++        if (prop == iter->data) {
++            found = true;
++            break;
++        }
++    }
++    if (!found) {
++        abort();
++        return;
++    }
++    delete_prop(prop);
++    node->props = g_list_delete_link(node->props, iter);
++
++    //sanity
++    if (0 == node->prop_count) {
++        abort();
++    }
++
++    node->prop_count--;
++}
++
++void add_dtb_prop(DTBNode *n, const char *name, uint32_t size, uint8_t *val)
++{
++    if ((NULL == n) || (NULL == name) || (NULL == val)) {
++        abort();
++    }
++    DTBProp *prop = g_new0(DTBProp, 1);
++    memcpy(&prop->name[0], name, DTB_PROP_NAME_LEN);
++    prop->length = size;
++    prop->value = g_malloc0(size);
++    memcpy(&prop->value[0], val, size);
++    n->props = g_list_append(n->props, prop);
++    n->prop_count++;
++}
++
++void save_dtb(uint8_t *buf, DTBNode *root)
++{
++    if ((NULL == root) || (NULL == buf)) {
++        abort();
++    }
++
++    //TODO: handle cases where the buffer is not 4 bytes aligned
++    //though this is never expected to happen and the code is simpler this
++    //way
++    if (align_4_high_ptr(buf) != buf) {
++        abort();
++    }
++
++    save_node(root, &buf);
++}
++
++static uint64_t get_dtb_prop_size(DTBProp *prop)
++{
++    uint64_t size = 0;
++
++    if (NULL == prop) {
++        abort();
++    }
++
++    size = align_4_high_num(sizeof(prop->name) + sizeof(prop->length) +
++                            prop->length);
++    return size;
++}
++
++uint64_t get_dtb_node_buffer_size(DTBNode *node)
++{
++    uint64_t size = 0;
++    DTBProp *prop = NULL;
++    DTBNode *child = NULL;
++    GList *iter = NULL;
++
++    if (NULL == node) {
++        abort();
++    }
++
++    size += sizeof(node->prop_count) + sizeof(node->child_node_count);
++
++    for (iter = node->props; iter != NULL; iter = iter->next) {
++        prop = (DTBProp *)iter->data;
++        if (NULL == prop) {
++            abort();
++        }
++        size += get_dtb_prop_size(prop);
++    }
++    for (iter = node->child_nodes; iter != NULL; iter = iter->next) {
++        child = (DTBNode *)iter->data;
++        if (NULL == child) {
++            abort();
++        }
++        size += get_dtb_node_buffer_size(child);
++    }
++    return size;
++}
++
++DTBProp *get_dtb_prop(DTBNode *node, const char *name)
++{
++    if ((NULL == node) || (NULL == name)) {
++        abort();
++    }
++
++    GList *iter = NULL;
++    DTBProp *prop = NULL;
++
++    for (iter = node->props; iter != NULL; iter = iter->next) {
++        prop = (DTBProp *)iter->data;
++
++        if (NULL == prop) {
++            abort();
++        }
++
++        if (0 == strncmp((const char *)&prop->name[0], name,
++                         DTB_PROP_NAME_LEN)) {
++            return prop;
++        }
++    }
++    return NULL;
++}
++
++DTBNode *get_dtb_child_node_by_name(DTBNode *node, const char *name)
++{
++    if ((NULL == node) || (NULL == name)) {
++        abort();
++    }
++
++    GList *iter = NULL;
++    DTBProp *prop = NULL;
++    DTBNode *child = NULL;
++
++    for (iter = node->child_nodes; iter != NULL; iter = iter->next) {
++        child = (DTBNode *)iter->data;
++
++        if (NULL == child) {
++            abort();
++        }
++
++        prop = get_dtb_prop(child, "name");
++
++        if (NULL == prop) {
++            abort();
++        }
++
++        if (0 == strncmp((const char *)prop->value, name, prop->length)) {
++            return child;
++        }
++    }
++    return NULL;
++}
++
++void overwrite_dtb_prop_val(DTBProp *prop, uint8_t chr)
++{
++    uint64_t i = 0;
++    uint8_t *ptr = prop->value;
++    for (i = 0; i < prop->length - 1; i++) {
++        ptr[i] = chr;
++    }
++}
++
++void overwrite_dtb_prop_name(DTBProp *prop, uint8_t chr)
++{
++    uint64_t i = 0;
++    uint8_t *ptr = &prop->name[0];
++    for (i = 0; i < DTB_PROP_NAME_LEN; i++) {
++        ptr[i] = chr;
++    }
++}
+diff --git a/xnu-qemu-arm64-5.1.0/hw/arm/xnu_fb_cfg.c b/xnu-qemu-arm64-5.1.0/hw/arm/xnu_fb_cfg.c
+new file mode 100644
+index 0000000..eabe984
+--- /dev/null
++++ b/xnu-qemu-arm64-5.1.0/hw/arm/xnu_fb_cfg.c
+@@ -0,0 +1,61 @@
++/*
++ *
++ * Copyright (c) 2019 Jonathan Afek <jonyafek@me.com>
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a copy
++ * of this software and associated documentation files (the "Software"), to deal
++ * in the Software without restriction, including without limitation the rights
++ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
++ * copies of the Software, and to permit persons to whom the Software is
++ * furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice shall be included in
++ * all copies or substantial portions of the Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
++ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
++ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
++ * THE SOFTWARE.
++ */
++
++#include "qemu/osdep.h"
++#include "qapi/error.h"
++#include "qemu-common.h"
++#include "hw/arm/boot.h"
++#include "sysemu/sysemu.h"
++#include "qemu/error-report.h"
++#include "hw/arm/xnu.h"
++#include "hw/loader.h"
++#include "hw/arm/xnu_file_mmio_dev.h"
++#include "hw/display/xnu_ramfb.h"
++#include "include/hw/qdev-properties.h"
++
++void xnu_define_ramfb_device(AddressSpace* as, hwaddr ramfb_pa)
++{
++
++    DeviceState *fb_dev;
++    fb_dev = qdev_new(TYPE_XNU_RAMFB_DEVICE);
++    qdev_prop_set_uint64(fb_dev, "as", (hwaddr)as);
++    qdev_prop_set_uint64(fb_dev, "fb_pa", ramfb_pa);
++    qdev_prop_set_uint32(fb_dev, "fb_size", RAMFB_SIZE);
++    qdev_prop_set_uint32(fb_dev, "display_cfg.height", V_HEIGHT);
++    qdev_prop_set_uint32(fb_dev, "display_cfg.width", V_WIDTH);
++    qdev_prop_set_uint32(fb_dev, "display_cfg.linesize", V_LINESIZE);
++    sysbus_realize_and_unref(SYS_BUS_DEVICE(fb_dev), &error_fatal);
++}
++
++void  xnu_get_video_bootargs(void *opaque, hwaddr ramfb_pa)
++{
++
++    video_boot_args* v_bootargs = (video_boot_args*)opaque;
++    v_bootargs->v_baseAddr = ramfb_pa;
++    v_bootargs->v_depth = V_DEPTH;
++    v_bootargs->v_display = V_DISPLAY;
++    v_bootargs->v_height = V_HEIGHT;
++    v_bootargs->v_width = V_WIDTH;
++    v_bootargs->v_rowBytes = V_LINESIZE;
++
++}
+diff --git a/xnu-qemu-arm64-5.1.0/hw/arm/xnu_file_mmio_dev.c b/xnu-qemu-arm64-5.1.0/hw/arm/xnu_file_mmio_dev.c
+new file mode 100644
+index 0000000..5d025c3
+--- /dev/null
++++ b/xnu-qemu-arm64-5.1.0/hw/arm/xnu_file_mmio_dev.c
+@@ -0,0 +1,106 @@
++/*
++ *
++ * Copyright (c) 2019 Jonathan Afek <jonyafek@me.com>
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a copy
++ * of this software and associated documentation files (the "Software"), to deal
++ * in the Software without restriction, including without limitation the rights
++ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
++ * copies of the Software, and to permit persons to whom the Software is
++ * furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice shall be included in
++ * all copies or substantial portions of the Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
++ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
++ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
++ * THE SOFTWARE.
++ */
++
++#include "qemu/osdep.h"
++#include "qapi/error.h"
++#include "qemu-common.h"
++#include "hw/arm/boot.h"
++#include "sysemu/sysemu.h"
++#include "qemu/error-report.h"
++#include "hw/arm/xnu.h"
++#include "hw/loader.h"
++#include "hw/arm/xnu_file_mmio_dev.h"
++
++static uint64_t xnu_file_mmio_dev_read(void *opaque,
++                                       hwaddr addr, unsigned size)
++{
++    FileMmioDev *file_dev = opaque;
++    uint64_t ret = 0;
++
++    if (addr + size > file_dev->size) {
++        abort();
++    }
++
++    if (size > sizeof(ret)) {
++        abort();
++    }
++
++    if (addr != lseek(file_dev->fd, addr, SEEK_SET)) {
++        abort();
++    }
++
++    if (size != read(file_dev->fd, &ret, size)) {
++        abort();
++    }
++
++    return ret;
++}
++
++static void xnu_file_mmio_dev_write(void *opaque, hwaddr addr,
++                                    uint64_t val, unsigned size)
++{
++    FileMmioDev *file_dev = opaque;
++
++    if (addr + size > file_dev->size) {
++        abort();
++    }
++
++    if (addr != lseek(file_dev->fd, addr, SEEK_SET)) {
++        abort();
++    }
++
++    if (size != write(file_dev->fd, &val, size)) {
++        abort();
++    }
++
++}
++
++const MemoryRegionOps xnu_file_mmio_dev_ops = {
++    .read = xnu_file_mmio_dev_read,
++    .write = xnu_file_mmio_dev_write,
++    .endianness = DEVICE_NATIVE_ENDIAN,
++};
++
++void xnu_file_mmio_dev_create(MemoryRegion *sysmem, FileMmioDev *file_dev,
++                              const char *name, const char *filename)
++{
++    MemoryRegion *iomem = g_new(MemoryRegion, 1);
++    struct stat st;
++
++    if (-1 == lstat(filename, &st)) {
++        abort();
++    }
++
++    file_dev->size = st.st_size;
++
++    memory_region_init_io(iomem, NULL, &xnu_file_mmio_dev_ops, file_dev,
++                          name, file_dev->size);
++    memory_region_add_subregion(sysmem, file_dev->pa, iomem);
++
++    //TODO; think about using O_SYNC
++    //or maybe use fsync() from time to time
++    file_dev->fd = open(filename, O_RDWR);
++    if (-1 == file_dev->fd) {
++        abort();
++    }
++}
+diff --git a/xnu-qemu-arm64-5.1.0/hw/arm/xnu_mem.c b/xnu-qemu-arm64-5.1.0/hw/arm/xnu_mem.c
+new file mode 100644
+index 0000000..5e4a62f
+--- /dev/null
++++ b/xnu-qemu-arm64-5.1.0/hw/arm/xnu_mem.c
+@@ -0,0 +1,122 @@
++/*
++ * Copyright (c) 2019 Jonathan Afek <jonyafek@me.com>
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a copy
++ * of this software and associated documentation files (the "Software"), to deal
++ * in the Software without restriction, including without limitation the rights
++ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
++ * copies of the Software, and to permit persons to whom the Software is
++ * furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice shall be included in
++ * all copies or substantial portions of the Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
++ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
++ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
++ * THE SOFTWARE.
++ */
++
++#include "qemu/osdep.h"
++#include "qapi/error.h"
++#include "qemu-common.h"
++#include "hw/arm/boot.h"
++#include "exec/address-spaces.h"
++#include "hw/misc/unimp.h"
++#include "sysemu/sysemu.h"
++#include "qemu/error-report.h"
++#include "hw/platform-bus.h"
++#include "exec/memory.h"
++#include "qemu-common.h"
++#include "exec/hwaddr.h"
++#include "hw/boards.h"
++#include "hw/arm/boot.h"
++#include "cpu.h"
++#include "hw/arm/xnu_mem.h"
++
++hwaddr g_virt_base = 0;
++hwaddr g_phys_base = 0;
++
++hwaddr vtop_bases(hwaddr va, hwaddr phys_base, hwaddr virt_base)
++{
++    if ((0 == virt_base) || (0 == phys_base)) {
++        abort();
++    }
++    return va - virt_base + phys_base;
++}
++
++hwaddr ptov_bases(hwaddr pa, hwaddr phys_base, hwaddr virt_base)
++{
++    if ((0 == virt_base) || (0 == phys_base)) {
++        abort();
++    }
++    return pa - phys_base + virt_base;
++}
++
++hwaddr vtop_static(hwaddr va)
++{
++    return vtop_bases(va, g_phys_base, g_virt_base);
++}
++
++hwaddr ptov_static(hwaddr pa)
++{
++    return ptov_bases(pa, g_phys_base, g_virt_base);
++}
++
++hwaddr vtop_mmu(hwaddr va, CPUState *cs)
++{
++    hwaddr phys_addr;
++    MemTxAttrs attrs = {};
++
++    phys_addr = arm_cpu_get_phys_page_attrs_debug(cs, va, &attrs);
++    if (-1 == phys_addr) {
++        abort();
++    }
++
++    return phys_addr;
++}
++
++uint8_t get_highest_different_bit_index(hwaddr addr1, hwaddr addr2)
++{
++    if ((addr1 == addr2) || (0 == addr1) || (0 == addr2)) {
++        abort();
++    }
++    return (64 - __builtin_clzll(addr1 ^ addr2));
++}
++
++hwaddr align_64k_low(hwaddr addr)
++{
++    return addr & ~0xffffull;
++}
++
++hwaddr align_64k_high(hwaddr addr)
++{
++    return (addr + 0xffffull) & ~0xffffull;
++}
++
++uint8_t get_lowest_non_zero_bit_index(hwaddr addr)
++{
++    if (0 == addr) {
++        abort();
++    }
++    return __builtin_ctzll(addr);
++}
++
++hwaddr get_low_bits_mask_for_bit_index(uint8_t bit_index)
++{
++    if (bit_index >= 64) {
++        abort();
++    }
++    return (1 << bit_index) - 1;
++}
++
++void allocate_ram(MemoryRegion *top, const char *name, hwaddr addr,
++                  hwaddr size)
++{
++        MemoryRegion *sec = g_new(MemoryRegion, 1);
++        memory_region_init_ram(sec, NULL, name, size, &error_fatal);
++        memory_region_add_subregion(top, addr, sec);
++}
+diff --git a/xnu-qemu-arm64-5.1.0/hw/arm/xnu_pagetable.c b/xnu-qemu-arm64-5.1.0/hw/arm/xnu_pagetable.c
+new file mode 100644
+index 0000000..cfce447
+--- /dev/null
++++ b/xnu-qemu-arm64-5.1.0/hw/arm/xnu_pagetable.c
+@@ -0,0 +1,230 @@
++/*
++ *
++ * Copyright (c) 2019 Jonathan Afek <jonyafek@me.com>
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a copy
++ * of this software and associated documentation files (the "Software"), to deal
++ * in the Software without restriction, including without limitation the rights
++ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
++ * copies of the Software, and to permit persons to whom the Software is
++ * furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice shall be included in
++ * all copies or substantial portions of the Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
++ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
++ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
++ * THE SOFTWARE.
++ */
++
++#include "qemu/osdep.h"
++#include "qapi/error.h"
++#include "qemu-common.h"
++#include "hw/arm/boot.h"
++#include "sysemu/sysemu.h"
++#include "qemu/error-report.h"
++#include "hw/arm/xnu_pagetable.h"
++#include "hw/loader.h"
++#include "qemu/osdep.h"
++#include "target/arm/idau.h"
++#include "trace.h"
++#include "cpu.h"
++#include "internals.h"
++#include "exec/gdbstub.h"
++#include "exec/helper-proto.h"
++#include "qemu/host-utils.h"
++#include "sysemu/arch_init.h"
++#include "sysemu/sysemu.h"
++#include "qemu/bitops.h"
++#include "qemu/crc32c.h"
++#include "exec/exec-all.h"
++#include "exec/cpu_ldst.h"
++#include "arm_ldst.h"
++#include "hw/semihosting/semihost.h"
++
++#define PHYS_ADDR_SIZE (40)
++#define TG_16K_SIZE (14)
++#define PAGE_MASK_16K (~(((uint64_t)1 << TG_16K_SIZE) - 1))
++#define TE_PHYS_ADDR_MASK ((((uint64_t)1 << PHYS_ADDR_SIZE) - 1) & \
++                           PAGE_MASK_16K)
++
++#define TG_16KB (1)
++#define TG_16KB_LEVEL0_INDEX (47)
++#define TG_16KB_LEVEL0_SIZE (1)
++#define TG_16KB_LEVEL1_INDEX (36)
++#define TG_16KB_LEVEL1_SIZE (11)
++#define TG_16KB_LEVEL2_INDEX (25)
++#define TG_16KB_LEVEL2_SIZE (11)
++#define TG_16KB_LEVEL3_INDEX (14)
++#define TG_16KB_LEVEL3_SIZE (11)
++
++#define TCR_IPS_INDEX (32)
++#define TCR_IPS_SIZE (3)
++#define TCR_IPS_40_ADDR_SIZE (2)
++#define TCR_TG1_INDEX (30)
++#define TCR_TG1_SIZE (2)
++#define TCR_T1SZ_INDEX (16)
++#define TCR_T1SZ_SIZE (6)
++#define TCR_TG0_INDEX (14)
++#define TCR_TG0_SIZE (2)
++#define TCR_T0SZ_INDEX (0)
++#define TCR_T0SZ_SIZE (6)
++
++#define TE_ACCESS_PERMS_INDEX (6)
++#define TE_ACCESS_PERMS_SIZE (2)
++#define TE_ACCESS_PERMS_MASK ((((uint64_t)1 << TE_ACCESS_PERMS_SIZE) - 1) << \
++                              TE_ACCESS_PERMS_INDEX)
++#define TE_ACCESS_PERMS_ZERO_MASK (~TE_ACCESS_PERMS_MASK)
++#define TE_ACCESS_PERMS_KERN_RW (0)
++#define TE_XN_INDEX (53)
++#define TE_XN_SIZE (2)
++#define TE_XN_MASK ((((uint64_t)1 << TE_XN_SIZE) - 1) << TE_XN_INDEX)
++#define TE_XN_ZERO_MASK (~TE_XN_MASK)
++#define TE_XN_KERN_EXE ((uint64_t)2 << TE_XN_INDEX)
++#define TE_TYPE_INDEX (0)
++#define TE_TYPE_SIZE (2)
++#define TE_TYPE_TABLE_DESC (3)
++#define TE_TYPE_L3_BLOCK (3)
++
++hwaddr pt_tte_el1(ARMCPU *cpu, AddressSpace *as, hwaddr va, bool make_exe)
++{
++    CPUARMState *env = &cpu->env;
++    uint64_t tcr = env->cp15.tcr_el[1].raw_tcr;
++    uint64_t tcr_ips = extract64(tcr, TCR_IPS_INDEX, TCR_IPS_SIZE);
++    uint64_t tcr_tg1 = extract64(tcr, TCR_TG1_INDEX, TCR_TG1_SIZE);
++    uint64_t tcr_t1sz = extract64(tcr, TCR_T1SZ_INDEX, TCR_T1SZ_SIZE);
++    uint64_t tcr_tg0 = extract64(tcr, TCR_TG0_INDEX, TCR_TG0_SIZE);
++    uint64_t tcr_t0sz = extract64(tcr, TCR_T0SZ_INDEX, TCR_T0SZ_SIZE);
++
++    hwaddr tt = 0;
++    hwaddr te = 0;
++    uint64_t tg = 0;
++    uint64_t tsz = 0;
++
++    //currently only support 40bit addresses configuration
++    if (TCR_IPS_40_ADDR_SIZE != tcr_ips) {
++        abort();
++    }
++    //fprintf(stderr, "pt_tte_el1: tcr: 0x%016llx tcr_ips: 0x%016llx tcr_tg1: 0x%016llx tcr_t1sz: 0x%016llx tcr_tg0: %016llx tcr_t0sz: 0x%016llx va: 0x%016llx\n",
++    //        tcr, tcr_ips, tcr_tg1, tcr_t1sz, tcr_tg0, tcr_t0sz, va);
++
++    if (extract64(va, 63, 1) == 1) {
++        uint64_t one_bits = extract64(va, 64 - tcr_t1sz, tcr_t1sz);
++        uint64_t one_bits_verify = (1 << tcr_t1sz) - 1;
++        //fprintf(stderr, "90 pt_tte_el1: te: 0x%016llx\n", te);
++        if ((one_bits & one_bits_verify) != one_bits_verify) {
++            fprintf(stderr, "9 pt_tte_el1: te: 0x%016llx\n", te);
++            abort();
++        }
++        tt = env->cp15.ttbr1_el[1];
++        tg = tcr_tg1;
++        tsz = tcr_t1sz;
++    } else {
++        uint64_t zero_bits = extract64(va, 64 - tcr_t0sz, tcr_t0sz);
++        //fprintf(stderr, "91 pt_tte_el1: te: 0x%016lx\n", te);
++        if (0 != zero_bits) {
++            fprintf(stderr, "10 pt_tte_el1: te: 0x%016llx\n", te);
++            abort();
++        }
++        tt = env->cp15.ttbr0_el[1];
++        tg = tcr_tg0;
++        tsz = tcr_t0sz;
++    }
++
++    //currently only support parsing 16kg granule page tables
++    if (TG_16KB != tg) {
++        fprintf(stderr, "8 pt_tte_el1: te: 0x%016llx\n", te);
++        abort();
++    }
++
++    //currently only support level 1 base entries
++    if ((tsz < (64 - TG_16KB_LEVEL0_INDEX)) ||
++        (tsz >= (64 - TG_16KB_LEVEL1_INDEX))) {
++        fprintf(stderr, "7 pt_tte_el1: te: 0x%016llx\n", te);
++        abort();
++    }
++
++    uint64_t l1_index_size = 64 - tsz - TG_16KB_LEVEL1_INDEX;
++    uint64_t l1_idx = extract64(va, TG_16KB_LEVEL1_INDEX, l1_index_size);
++    uint64_t l2_idx = extract64(va, TG_16KB_LEVEL2_INDEX, TG_16KB_LEVEL2_SIZE);
++    uint64_t l3_idx = extract64(va, TG_16KB_LEVEL3_INDEX, TG_16KB_LEVEL3_SIZE);
++
++    address_space_rw(as, (tt + (sizeof(hwaddr) * l1_idx)),
++                     MEMTXATTRS_UNSPECIFIED, (uint8_t *)&te, sizeof(te), 0);
++    if (0 == te) {
++        fprintf(stderr, "6 pt_tte_el1: te: 0x%016llx\n", te);
++        abort();
++    }
++
++    uint64_t te_type = extract64(te, TE_TYPE_INDEX, TE_TYPE_SIZE);
++    //currently only support table description level1 entries
++    if (TE_TYPE_TABLE_DESC != te_type) {
++        fprintf(stderr, "5 pt_tte_el1: te: 0x%016llx\n", te);
++        abort();
++    }
++
++    //layer 2
++    tt = te & TE_PHYS_ADDR_MASK;
++    address_space_rw(as, (tt + (sizeof(hwaddr) * l2_idx)),
++                     MEMTXATTRS_UNSPECIFIED, (uint8_t *)&te, sizeof(te), 0);
++    if (0 == te) {
++        fprintf(stderr, "4 pt_tte_el1: te: 0x%016llx\n", te);
++        abort();
++    }
++
++    te_type = extract64(te, TE_TYPE_INDEX, TE_TYPE_SIZE);
++    //currently only support table description level2 entries
++    if (TE_TYPE_TABLE_DESC != te_type) {
++        fprintf(stderr, "3 pt_tte_el1: te: 0x%016llx\n", te);
++        abort();
++    }
++
++    //layer 3
++    tt = te & TE_PHYS_ADDR_MASK;
++    hwaddr l3_te_addr = tt + (sizeof(hwaddr) * l3_idx);
++    address_space_rw(as, l3_te_addr, MEMTXATTRS_UNSPECIFIED, (uint8_t *)&te,
++                     sizeof(te), 0);
++    if (0 == te) {
++        fprintf(stderr, "2 pt_tte_el1: te: 0x%016llx\n", te);
++        abort();
++    }
++
++    te_type = extract64(te, TE_TYPE_INDEX, TE_TYPE_SIZE);
++    //sanity - l3 entries can only be block entries or invalid entries
++    if (TE_TYPE_L3_BLOCK != te_type) {
++        fprintf(stderr, "1 pt_tte_el1: te: 0x%016llx\n", te);
++        abort();
++    }
++
++    //fprintf(stderr, "pt_tte_el1: te: 0x%016llx\n", te);
++
++    if (make_exe) {
++        //fprintf(stderr, "pt_tte_el1: TE_ACCESS_PERMS_ZERO_MASK: 0x%016llx\n", TE_ACCESS_PERMS_ZERO_MASK);
++        //fprintf(stderr, "pt_tte_el1: TE_XN_ZERO_MASK: 0x%016llx\n", TE_XN_ZERO_MASK);
++        //fprintf(stderr, "pt_tte_el1: TE_ACCESS_PERMS_KERN_RW: 0x%016llx\n", TE_ACCESS_PERMS_KERN_RW);
++        //fprintf(stderr, "pt_tte_el1: TE_XN_KERN_EXE: 0x%016llx\n", TE_XN_KERN_EXE);
++        te &= TE_ACCESS_PERMS_ZERO_MASK & TE_XN_ZERO_MASK;
++        te |= TE_ACCESS_PERMS_KERN_RW | TE_XN_KERN_EXE;
++        address_space_rw(as, l3_te_addr, MEMTXATTRS_UNSPECIFIED,
++                         (uint8_t *)&te, sizeof(te), 1);
++        tlb_flush(CPU(cpu));
++    }
++
++    //fprintf(stderr, "pt_tte_el1: te: 0x%016llx\n", te);
++
++    uint64_t page_offset = extract64(va, 0, TG_16K_SIZE);
++    return (te & TE_PHYS_ADDR_MASK) + page_offset;
++}
++
++void va_make_exec(ARMCPU *cpu, AddressSpace *as, hwaddr va, hwaddr size)
++{
++    hwaddr curr_va = va & PAGE_MASK_16K;
++    while (curr_va < va + size) {
++        pt_tte_el1(cpu, as, curr_va, true);
++        curr_va += ((uint64_t)1 << TG_16K_SIZE);
++    }
++}
+diff --git a/xnu-qemu-arm64-5.1.0/hw/arm/xnu_trampoline_hook.c b/xnu-qemu-arm64-5.1.0/hw/arm/xnu_trampoline_hook.c
+new file mode 100644
+index 0000000..2975543
+--- /dev/null
++++ b/xnu-qemu-arm64-5.1.0/hw/arm/xnu_trampoline_hook.c
+@@ -0,0 +1,521 @@
++/*
++ *
++ * Copyright (c) 2019 Jonathan Afek <jonyafek@me.com>
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a copy
++ * of this software and associated documentation files (the "Software"), to deal
++ * in the Software without restriction, including without limitation the rights
++ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
++ * copies of the Software, and to permit persons to whom the Software is
++ * furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice shall be included in
++ * all copies or substantial portions of the Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
++ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
++ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
++ * THE SOFTWARE.
++ */
++
++#include "qemu/osdep.h"
++#include "qapi/error.h"
++#include "qemu-common.h"
++#include "hw/arm/boot.h"
++#include "sysemu/sysemu.h"
++#include "qemu/error-report.h"
++#include "hw/arm/xnu_trampoline_hook.h"
++#include "hw/arm/xnu_mem.h"
++#include "hw/arm/xnu_pagetable.h"
++#include "hw/loader.h"
++#include "qemu/osdep.h"
++#include "target/arm/idau.h"
++#include "trace.h"
++#include "cpu.h"
++#include "internals.h"
++#include "exec/gdbstub.h"
++#include "exec/helper-proto.h"
++#include "qemu/host-utils.h"
++#include "sysemu/arch_init.h"
++#include "sysemu/sysemu.h"
++#include "qemu/bitops.h"
++#include "qemu/crc32c.h"
++#include "exec/exec-all.h"
++#include "exec/cpu_ldst.h"
++#include "arm_ldst.h"
++#include "hw/semihosting/semihost.h"
++#include "sysemu/hw_accel.h"
++
++#define TRAMPOLINE_CODE_INSTS (1024)
++#define TRAMPOLINE_CODE_SIZE (TRAMPOLINE_CODE_INSTS * 4)
++
++#define PAGE_4K_BITS (12)
++#define PAGE_4K_MASK (((uint64_t)1 << PAGE_4K_BITS) - 1)
++#define PAGE_4K_ALIGN_MASK (~(PAGE_4K_MASK))
++
++#define ADRP_IMMLO_SIZE (2)
++#define ADRP_IMMLO_MASK (((uint32_t)1 << ADRP_IMMLO_SIZE) - 1)
++#define ADRP_IMMLO_SHIFT (29)
++
++#define ADRP_IMMHI_SIZE (19)
++#define ADRP_IMMHI_MASK (((uint32_t)1 << ADRP_IMMHI_SIZE) - 1)
++#define ADRP_IMMHI_SHIFT (5)
++
++#define ADRP_RD_SIZE (5)
++#define ADRP_RD_MASK (((uint32_t)1 << ADRP_RD_SIZE) - 1)
++#define ADRP_RD_SHIFT (0)
++
++#define ADD_RN_SIZE (5)
++#define ADD_RN_MASK (((uint32_t)1 << ADD_RN_SIZE) - 1)
++#define ADD_RN_SHIFT (5)
++
++#define ADD_RD_SIZE (5)
++#define ADD_RD_MASK (((uint32_t)1 << ADD_RD_SIZE) - 1)
++#define ADD_RD_SHIFT (0)
++
++#define ADD_IMM_SIZE (12)
++#define ADD_IMM_MASK (((uint32_t)1 << ADD_IMM_SIZE) - 1)
++#define ADD_IMM_SHIFT (10)
++
++#define SUB_RN_SIZE (5)
++#define SUB_RN_MASK (((uint32_t)1 << SUB_RN_SIZE) - 1)
++#define SUB_RN_SHIFT (5)
++
++#define SUB_RD_SIZE (5)
++#define SUB_RD_MASK (((uint32_t)1 << SUB_RD_SIZE) - 1)
++#define SUB_RD_SHIFT (0)
++
++#define SUB_IMM_SIZE (12)
++#define SUB_IMM_MASK (((uint32_t)1 << SUB_IMM_SIZE) - 1)
++#define SUB_IMM_SHIFT (10)
++
++#define STR_64_FP_RN_SIZE (5)
++#define STR_64_FP_RN_MASK (((uint32_t)1 << STR_64_FP_RN_SIZE) - 1)
++#define STR_64_FP_RN_SHIFT (5)
++
++#define STR_64_FP_RT_SIZE (5)
++#define STR_64_FP_RT_MASK (((uint32_t)1 << STR_64_FP_RT_SIZE) - 1)
++#define STR_64_FP_RT_SHIFT (0)
++
++#define STR_64_FP_IMM_SIZE (12)
++#define STR_64_FP_IMM_MASK (((uint32_t)1 << STR_64_FP_IMM_SIZE) - 1)
++#define STR_64_FP_IMM_SHIFT (10)
++
++#define LDR_64_FP_RN_SIZE (5)
++#define LDR_64_FP_RN_MASK (((uint32_t)1 << LDR_64_FP_RN_SIZE) - 1)
++#define LDR_64_FP_RN_SHIFT (5)
++
++#define LDR_64_FP_RT_SIZE (5)
++#define LDR_64_FP_RT_MASK (((uint32_t)1 << LDR_64_FP_RT_SIZE) - 1)
++#define LDR_64_FP_RT_SHIFT (0)
++
++#define LDR_64_FP_IMM_SIZE (12)
++#define LDR_64_FP_IMM_MASK (((uint32_t)1 << LDR_64_FP_IMM_SIZE) - 1)
++#define LDR_64_FP_IMM_SHIFT (10)
++
++#define STP_XT1_SIZE (5)
++#define STP_XT1_MASK (((uint32_t)1 << STP_XT1_SIZE) - 1)
++#define STP_XT1_SHIFT (0)
++
++#define STP_XT2_SIZE (5)
++#define STP_XT2_MASK (((uint32_t)1 << STP_XT2_SIZE) - 1)
++#define STP_XT2_SHIFT (10)
++
++#define STP_RN_SIZE (5)
++#define STP_RN_MASK (((uint32_t)1 << ADD_RN_SIZE) - 1)
++#define STP_RN_SHIFT (5)
++
++#define STP_IMM_SIZE (7)
++#define STP_IMM_MASK (((uint32_t)1 << STP_IMM_SIZE) - 1)
++#define STP_IMM_SHIFT (15)
++
++#define LDP_XT1_SIZE (5)
++#define LDP_XT1_MASK (((uint32_t)1 << LDP_XT1_SIZE) - 1)
++#define LDP_XT1_SHIFT (0)
++
++#define LDP_XT2_SIZE (5)
++#define LDP_XT2_MASK (((uint32_t)1 << LDP_XT2_SIZE) - 1)
++#define LDP_XT2_SHIFT (10)
++
++#define LDP_RN_SIZE (5)
++#define LDP_RN_MASK (((uint32_t)1 << LDP_RN_SIZE) - 1)
++#define LDP_RN_SHIFT (5)
++
++#define LDP_IMM_SIZE (7)
++#define LDP_IMM_MASK (((uint32_t)1 << LDP_IMM_SIZE) - 1)
++#define LDP_IMM_SHIFT (15)
++
++#define BR_RN_SIZE (5)
++#define BR_RN_MASK (((uint32_t)1 << BR_RN_SIZE) - 1)
++#define BR_RN_SHIFT (5)
++
++#define BLR_RN_SIZE (5)
++#define BLR_RN_MASK (((uint32_t)1 << BLR_RN_SIZE) - 1)
++#define BLR_RN_SHIFT (5)
++
++static AddressSpace *xnu_hook_tr_as = NULL;
++static ARMCPU *xnu_hook_tr_cpu = NULL;
++
++static uint32_t get_adrp_inst(hwaddr source, hwaddr target, uint8_t reg_id)
++{
++    //general adrp inst
++    uint32_t adrp_inst = 0x90000000;
++
++    adrp_inst |= (reg_id & ADRP_RD_MASK) << ADRP_RD_SHIFT;
++
++    hwaddr source_page = source & PAGE_4K_ALIGN_MASK;
++    hwaddr target_page = target & PAGE_4K_ALIGN_MASK;
++
++    hwaddr adrp_inst_diff_imm = ((target_page - source_page) >> PAGE_4K_BITS);
++
++    adrp_inst |= (adrp_inst_diff_imm & ADRP_IMMLO_MASK) << ADRP_IMMLO_SHIFT;
++    adrp_inst |= ((adrp_inst_diff_imm >> ADRP_IMMLO_SIZE) &
++                  ADRP_IMMHI_MASK) << ADRP_IMMHI_SHIFT;
++
++    return adrp_inst;
++}
++
++static uint32_t get_add_inst(uint8_t xd, uint8_t xn, hwaddr imm)
++{
++    //general add inst
++    uint32_t add_inst = 0x91000000;
++
++    add_inst |= (xn & ADD_RN_MASK) << ADD_RN_SHIFT;
++    add_inst |= (xd & ADD_RD_MASK) << ADD_RD_SHIFT;
++    add_inst |= (imm & ADD_IMM_MASK) << ADD_IMM_SHIFT;
++
++    return add_inst;
++}
++
++static uint32_t get_sub_inst(uint8_t xd, uint8_t xn, hwaddr imm)
++{
++    //general sub inst
++    uint32_t sub_inst = 0xD1000000;
++
++    sub_inst |= (xn & SUB_RN_MASK) << SUB_RN_SHIFT;
++    sub_inst |= (xd & SUB_RD_MASK) << SUB_RD_SHIFT;
++    sub_inst |= (imm & SUB_IMM_MASK) << SUB_IMM_SHIFT;
++
++    return sub_inst;
++}
++
++static uint32_t get_str_64_fp_inst(uint8_t dt, uint8_t xn, hwaddr imm)
++{
++    //general str inst
++    uint32_t str_inst = 0xFD000000;
++
++    //has to be devided by 8
++    if (imm % 8 != 0) {
++        abort();
++    }
++
++    imm = imm / 8;
++
++    str_inst |= (xn & STR_64_FP_RN_MASK) << STR_64_FP_RN_SHIFT;
++    str_inst |= (dt & STR_64_FP_RT_MASK) << STR_64_FP_RT_SHIFT;
++    str_inst |= (imm & STR_64_FP_IMM_MASK) << STR_64_FP_IMM_SHIFT;
++
++    return str_inst;
++}
++
++static uint32_t get_ldr_64_fp_inst(uint8_t dt, uint8_t xn, hwaddr imm)
++{
++    //general ldr inst
++    uint32_t ldr_inst = 0xFD400000;
++
++    //has to be devided by 8
++    if (imm % 8 != 0) {
++        abort();
++    }
++
++    imm = imm / 8;
++
++    ldr_inst |= (xn & LDR_64_FP_RN_MASK) << LDR_64_FP_RN_SHIFT;
++    ldr_inst |= (dt & LDR_64_FP_RT_MASK) << LDR_64_FP_RT_SHIFT;
++    ldr_inst |= (imm & LDR_64_FP_IMM_MASK) << LDR_64_FP_IMM_SHIFT;
++
++    return ldr_inst;
++}
++
++static uint32_t get_stp_inst(uint8_t xt1, uint8_t xt2, uint8_t rn, hwaddr imm)
++{
++    //general stp inst
++    uint32_t stp_inst = 0xA9000000;
++
++    //has to be devided by 8
++    if (imm % 8 != 0) {
++        abort();
++    }
++
++    imm = imm / 8;
++
++    if ((imm & STP_IMM_MASK) != imm) {
++        abort();
++    }
++
++    stp_inst |= (xt1 & STP_XT1_MASK) << STP_XT1_SHIFT;
++    stp_inst |= (xt2 & STP_XT2_MASK) << STP_XT2_SHIFT;
++    stp_inst |= (rn & STP_RN_MASK) << STP_RN_SHIFT;
++    stp_inst |= (imm & STP_IMM_MASK) << STP_IMM_SHIFT;
++
++    return stp_inst;
++}
++
++static uint32_t get_ldp_inst(uint8_t xt1, uint8_t xt2, uint8_t rn, hwaddr imm)
++{
++    //general ldp inst
++    uint32_t ldp_inst = 0xA9400000;
++
++    //has to be devided by 8
++    if (imm % 8 != 0) {
++        abort();
++    }
++
++    imm = imm / 8;
++
++    if ((imm & LDP_IMM_MASK) != imm) {
++        abort();
++    }
++
++    ldp_inst |= (xt1 & LDP_XT1_MASK) << LDP_XT1_SHIFT;
++    ldp_inst |= (xt2 & LDP_XT2_MASK) << LDP_XT2_SHIFT;
++    ldp_inst |= (rn & LDP_RN_MASK) << LDP_RN_SHIFT;
++    ldp_inst |= (imm & LDP_IMM_MASK) << LDP_IMM_SHIFT;
++
++    return ldp_inst;
++}
++
++static uint32_t get_br_inst(uint8_t reg_id)
++{
++    //general br inst
++    uint32_t br_inst = 0xD61F0000;
++
++    br_inst |= (reg_id & BR_RN_MASK) << BR_RN_SHIFT;
++
++    return br_inst;
++}
++
++static uint32_t get_blr_inst(uint8_t reg_id)
++{
++    //general blr inst
++    uint32_t blr_inst = 0xD63F0000;
++
++    blr_inst |= (reg_id & BLR_RN_MASK) << BLR_RN_SHIFT;
++
++    return blr_inst;
++}
++
++void xnu_hook_tr_install(hwaddr va, hwaddr pa, hwaddr cb_va, hwaddr tr_buf_va,
++                         hwaddr tr_buf_pa, uint8_t scratch_reg)
++{
++    //must run setup before installing hook
++    if ((NULL == xnu_hook_tr_as) || (NULL == xnu_hook_tr_cpu)) {
++        abort();
++    }
++
++    if ((0 == va) || (0 == pa) || (0 == cb_va) || (0 == tr_buf_va) ||
++        (0 == tr_buf_pa)) {
++        abort();
++    }
++
++    uint32_t backup_insts[3] = {0};
++    uint32_t new_insts[3] = {0};
++    uint32_t tr_insts[TRAMPOLINE_CODE_INSTS] = {0};
++    uint64_t i = 0;
++
++    address_space_rw(xnu_hook_tr_as, pa, MEMTXATTRS_UNSPECIFIED,
++                     (uint8_t *)&backup_insts[0], sizeof(backup_insts), 0);
++
++    new_insts[0] = get_adrp_inst(va, tr_buf_va, scratch_reg);
++    new_insts[1] = get_add_inst(scratch_reg, scratch_reg,
++                                tr_buf_va & PAGE_4K_MASK);
++    new_insts[2] = get_br_inst(scratch_reg);
++
++    address_space_rw(xnu_hook_tr_as, pa, MEMTXATTRS_UNSPECIFIED,
++                     (uint8_t *)&new_insts[0], sizeof(new_insts), 1);
++
++    //31 is treated as sp in aarch64
++    tr_insts[i++] = get_add_inst(scratch_reg, 31, 0);
++    tr_insts[i++] = get_sub_inst(scratch_reg ,scratch_reg, 0x200);
++
++    tr_insts[i++] = get_stp_inst(0, 1, scratch_reg, 0);
++    tr_insts[i++] = get_stp_inst(2, 3, scratch_reg, 0x10);
++    tr_insts[i++] = get_stp_inst(4, 5, scratch_reg, 0x20);
++    tr_insts[i++] = get_stp_inst(6, 7, scratch_reg, 0x30);
++    tr_insts[i++] = get_stp_inst(8, 9, scratch_reg, 0x40);
++    tr_insts[i++] = get_stp_inst(10, 11, scratch_reg, 0x50);
++    tr_insts[i++] = get_stp_inst(12, 13, scratch_reg, 0x60);
++    tr_insts[i++] = get_stp_inst(14, 15, scratch_reg, 0x70);
++    tr_insts[i++] = get_stp_inst(16, 17, scratch_reg, 0x80);
++    tr_insts[i++] = get_stp_inst(18, 19, scratch_reg, 0x90);
++    tr_insts[i++] = get_stp_inst(20, 21, scratch_reg, 0xa0);
++    tr_insts[i++] = get_stp_inst(22, 23, scratch_reg, 0x30);
++    tr_insts[i++] = get_stp_inst(24, 25, scratch_reg, 0xb0);
++    tr_insts[i++] = get_stp_inst(26, 27, scratch_reg, 0xc0);
++    tr_insts[i++] = get_stp_inst(28, 29, scratch_reg, 0xd0);
++    tr_insts[i++] = get_stp_inst(0, 30, scratch_reg, 0xe0);
++
++    tr_insts[i++] = get_str_64_fp_inst(0, scratch_reg, 0xf0);
++    tr_insts[i++] = get_str_64_fp_inst(1, scratch_reg, 0xf8);
++    tr_insts[i++] = get_str_64_fp_inst(2, scratch_reg, 0x100);
++    tr_insts[i++] = get_str_64_fp_inst(3, scratch_reg, 0x108);
++    tr_insts[i++] = get_str_64_fp_inst(4, scratch_reg, 0x110);
++    tr_insts[i++] = get_str_64_fp_inst(5, scratch_reg, 0x118);
++    tr_insts[i++] = get_str_64_fp_inst(6, scratch_reg, 0x120);
++    tr_insts[i++] = get_str_64_fp_inst(7, scratch_reg, 0x128);
++    tr_insts[i++] = get_str_64_fp_inst(8, scratch_reg, 0x130);
++    tr_insts[i++] = get_str_64_fp_inst(9, scratch_reg, 0x138);
++    tr_insts[i++] = get_str_64_fp_inst(10, scratch_reg, 0x140);
++    tr_insts[i++] = get_str_64_fp_inst(11, scratch_reg, 0x148);
++    tr_insts[i++] = get_str_64_fp_inst(12, scratch_reg, 0x150);
++    tr_insts[i++] = get_str_64_fp_inst(13, scratch_reg, 0x158);
++    tr_insts[i++] = get_str_64_fp_inst(14, scratch_reg, 0x160);
++    tr_insts[i++] = get_str_64_fp_inst(15, scratch_reg, 0x168);
++    tr_insts[i++] = get_str_64_fp_inst(16, scratch_reg, 0x170);
++    tr_insts[i++] = get_str_64_fp_inst(17, scratch_reg, 0x178);
++    tr_insts[i++] = get_str_64_fp_inst(18, scratch_reg, 0x180);
++    tr_insts[i++] = get_str_64_fp_inst(19, scratch_reg, 0x188);
++    tr_insts[i++] = get_str_64_fp_inst(20, scratch_reg, 0x190);
++    tr_insts[i++] = get_str_64_fp_inst(21, scratch_reg, 0x198);
++    tr_insts[i++] = get_str_64_fp_inst(22, scratch_reg, 0x1a0);
++    tr_insts[i++] = get_str_64_fp_inst(23, scratch_reg, 0x1a8);
++    tr_insts[i++] = get_str_64_fp_inst(24, scratch_reg, 0x1b0);
++    tr_insts[i++] = get_str_64_fp_inst(25, scratch_reg, 0x1b8);
++    tr_insts[i++] = get_str_64_fp_inst(26, scratch_reg, 0x1c0);
++    tr_insts[i++] = get_str_64_fp_inst(27, scratch_reg, 0x1c8);
++    tr_insts[i++] = get_str_64_fp_inst(28, scratch_reg, 0x1d0);
++    tr_insts[i++] = get_str_64_fp_inst(29, scratch_reg, 0x1d8);
++    tr_insts[i++] = get_str_64_fp_inst(30, scratch_reg, 0x1e0);
++    tr_insts[i++] = get_str_64_fp_inst(31, scratch_reg, 0x1e8);
++
++    tr_insts[i++] = get_sub_inst(31 ,31, 0x200);
++
++    tr_insts[i] = get_adrp_inst(tr_buf_va  + (i * 4), cb_va, scratch_reg);
++    i++;
++    tr_insts[i++] = get_add_inst(scratch_reg, scratch_reg,
++                                 cb_va & PAGE_4K_MASK);
++    tr_insts[i++] = get_blr_inst(scratch_reg);
++
++    tr_insts[i++] = get_add_inst(scratch_reg, 31, 0);
++
++    tr_insts[i++] = get_ldp_inst(0, 1, scratch_reg, 0);
++    tr_insts[i++] = get_ldp_inst(2, 3, scratch_reg, 0x10);
++    tr_insts[i++] = get_ldp_inst(4, 5, scratch_reg, 0x20);
++    tr_insts[i++] = get_ldp_inst(6, 7, scratch_reg, 0x30);
++    tr_insts[i++] = get_ldp_inst(8, 9, scratch_reg, 0x40);
++    tr_insts[i++] = get_ldp_inst(10, 11, scratch_reg, 0x50);
++    tr_insts[i++] = get_ldp_inst(12, 13, scratch_reg, 0x60);
++    tr_insts[i++] = get_ldp_inst(14, 15, scratch_reg, 0x70);
++    tr_insts[i++] = get_ldp_inst(16, 17, scratch_reg, 0x80);
++    tr_insts[i++] = get_ldp_inst(18, 19, scratch_reg, 0x90);
++    tr_insts[i++] = get_ldp_inst(20, 21, scratch_reg, 0xa0);
++    tr_insts[i++] = get_ldp_inst(22, 23, scratch_reg, 0x30);
++    tr_insts[i++] = get_ldp_inst(24, 25, scratch_reg, 0xb0);
++    tr_insts[i++] = get_ldp_inst(26, 27, scratch_reg, 0xc0);
++    tr_insts[i++] = get_ldp_inst(28, 29, scratch_reg, 0xd0);
++    tr_insts[i++] = get_ldp_inst(0, 30, scratch_reg, 0xe0);
++
++    tr_insts[i++] = get_ldr_64_fp_inst(0, scratch_reg, 0xf0);
++    tr_insts[i++] = get_ldr_64_fp_inst(1, scratch_reg, 0xf8);
++    tr_insts[i++] = get_ldr_64_fp_inst(2, scratch_reg, 0x100);
++    tr_insts[i++] = get_ldr_64_fp_inst(3, scratch_reg, 0x108);
++    tr_insts[i++] = get_ldr_64_fp_inst(4, scratch_reg, 0x110);
++    tr_insts[i++] = get_ldr_64_fp_inst(5, scratch_reg, 0x118);
++    tr_insts[i++] = get_ldr_64_fp_inst(6, scratch_reg, 0x120);
++    tr_insts[i++] = get_ldr_64_fp_inst(7, scratch_reg, 0x128);
++    tr_insts[i++] = get_ldr_64_fp_inst(8, scratch_reg, 0x130);
++    tr_insts[i++] = get_ldr_64_fp_inst(9, scratch_reg, 0x138);
++    tr_insts[i++] = get_ldr_64_fp_inst(10, scratch_reg, 0x140);
++    tr_insts[i++] = get_ldr_64_fp_inst(11, scratch_reg, 0x148);
++    tr_insts[i++] = get_ldr_64_fp_inst(12, scratch_reg, 0x150);
++    tr_insts[i++] = get_ldr_64_fp_inst(13, scratch_reg, 0x158);
++    tr_insts[i++] = get_ldr_64_fp_inst(14, scratch_reg, 0x160);
++    tr_insts[i++] = get_ldr_64_fp_inst(15, scratch_reg, 0x168);
++    tr_insts[i++] = get_ldr_64_fp_inst(16, scratch_reg, 0x170);
++    tr_insts[i++] = get_ldr_64_fp_inst(17, scratch_reg, 0x178);
++    tr_insts[i++] = get_ldr_64_fp_inst(18, scratch_reg, 0x180);
++    tr_insts[i++] = get_ldr_64_fp_inst(19, scratch_reg, 0x188);
++    tr_insts[i++] = get_ldr_64_fp_inst(20, scratch_reg, 0x190);
++    tr_insts[i++] = get_ldr_64_fp_inst(21, scratch_reg, 0x198);
++    tr_insts[i++] = get_ldr_64_fp_inst(22, scratch_reg, 0x1a0);
++    tr_insts[i++] = get_ldr_64_fp_inst(23, scratch_reg, 0x1a8);
++    tr_insts[i++] = get_ldr_64_fp_inst(24, scratch_reg, 0x1b0);
++    tr_insts[i++] = get_ldr_64_fp_inst(25, scratch_reg, 0x1b8);
++    tr_insts[i++] = get_ldr_64_fp_inst(26, scratch_reg, 0x1c0);
++    tr_insts[i++] = get_ldr_64_fp_inst(27, scratch_reg, 0x1c8);
++    tr_insts[i++] = get_ldr_64_fp_inst(28, scratch_reg, 0x1d0);
++    tr_insts[i++] = get_ldr_64_fp_inst(29, scratch_reg, 0x1d8);
++    tr_insts[i++] = get_ldr_64_fp_inst(30, scratch_reg, 0x1e0);
++    tr_insts[i++] = get_ldr_64_fp_inst(31, scratch_reg, 0x1e8);
++
++    tr_insts[i++] = get_add_inst(31 ,31, 0x200);
++
++    tr_insts[i] = get_adrp_inst(tr_buf_va + (i * 4),
++                                va + sizeof(backup_insts), scratch_reg);
++    i++;
++    tr_insts[i++] = get_add_inst(scratch_reg, scratch_reg,
++                                 (va + sizeof(backup_insts)) & PAGE_4K_MASK);
++    tr_insts[i++] = backup_insts[0];
++    tr_insts[i++] = backup_insts[1];
++    tr_insts[i++] = backup_insts[2];
++    tr_insts[i++] = get_br_inst(scratch_reg);
++
++    if (i >= TRAMPOLINE_CODE_INSTS) {
++        abort();
++    }
++
++    address_space_rw(xnu_hook_tr_as, tr_buf_pa, MEMTXATTRS_UNSPECIFIED,
++                     (uint8_t *)&tr_insts[0], sizeof(tr_insts), 1);
++
++    va_make_exec(xnu_hook_tr_cpu, xnu_hook_tr_as, tr_buf_va,
++                 TRAMPOLINE_CODE_SIZE);
++}
++
++void xnu_hook_tr_copy_install(hwaddr va, hwaddr pa, hwaddr buf_va,
++                              hwaddr buf_pa, uint8_t *code, uint64_t code_size,
++                              uint64_t buf_size, uint8_t scratch_reg)
++{
++    //must run setup before installing hook
++    if ((NULL == xnu_hook_tr_as) || (NULL == xnu_hook_tr_cpu)) {
++        abort();
++    }
++
++    if ((0 == va) || (0 == pa) || (0 == buf_va) || (0 == buf_pa) ||
++        (NULL == code) || (0 == code_size) || (0 == buf_size)) {
++        abort();
++    }
++
++    if ((code_size + TRAMPOLINE_CODE_SIZE) >= buf_size) {
++        abort();
++    }
++
++    address_space_rw(xnu_hook_tr_as, (buf_pa + TRAMPOLINE_CODE_SIZE),
++                     MEMTXATTRS_UNSPECIFIED, (uint8_t *)code, code_size, 1);
++    va_make_exec(xnu_hook_tr_cpu, xnu_hook_tr_as, buf_va, buf_size);
++    xnu_hook_tr_install(va, pa, buf_va + TRAMPOLINE_CODE_SIZE, buf_va, buf_pa,
++                        scratch_reg);
++}
++
++void xnu_hook_tr_setup(AddressSpace *as, ARMCPU *cpu)
++{
++    //allow setup only once
++    if ((NULL != xnu_hook_tr_as) || (NULL != xnu_hook_tr_cpu)) {
++        abort();
++    }
++
++    //must setup with a non NULL AddressSpace
++    if (NULL == as) {
++        abort();
++    }
++
++    //must setup with a non NULL CPU
++    if (NULL == cpu) {
++        abort();
++    }
++
++    xnu_hook_tr_cpu = cpu;
++    xnu_hook_tr_as = as;
++}
+diff --git a/xnu-qemu-arm64-5.1.0/hw/display/xnu_ramfb.c b/xnu-qemu-arm64-5.1.0/hw/display/xnu_ramfb.c
+new file mode 100644
+index 0000000..b20609f
+--- /dev/null
++++ b/xnu-qemu-arm64-5.1.0/hw/display/xnu_ramfb.c
+@@ -0,0 +1,141 @@
++#include "qemu/osdep.h"
++#include "hw/loader.h"
++#include "hw/qdev-properties.h"
++#include "hw/display/xnu_ramfb.h"
++#include "ui/console.h"
++
++#define XNU_RAMFB(obj) \
++    OBJECT_CHECK(xnu_ramfb_state, (obj), TYPE_XNU_RAMFB_DEVICE)
++
++typedef struct display_cfg{
++    uint32_t format;
++    uint32_t width;
++    uint32_t height;
++    uint32_t linesize;
++} xnu_display_cfg;
++
++typedef struct xnu_ramfb_state {
++    SysBusDevice parent_obj;
++    xnu_display_cfg display_cfg;
++    QemuConsole* con;
++    uint8_t* qemu_fb_ptr; //Pointer that will sent to display callbacks
++    hwaddr fb_pa;
++    uint32_t fb_size;
++    hwaddr as;
++} xnu_ramfb_state;
++
++void xnu_ramfb_display_update(void *opaque)
++{
++    DisplaySurface *ds = NULL;
++    xnu_ramfb_state *xnu_ramfb = XNU_RAMFB(opaque);
++    uint32_t format = xnu_ramfb->display_cfg.format;
++    uint32_t width = xnu_ramfb->display_cfg.width;
++    uint32_t height = xnu_ramfb->display_cfg.height;
++    uint32_t linesize = xnu_ramfb->display_cfg.linesize;
++    QemuConsole *con = xnu_ramfb->con;
++    hwaddr as = xnu_ramfb->as;
++    hwaddr fb_pa = xnu_ramfb->fb_pa;
++    uint32_t fb_size = xnu_ramfb->fb_size;
++    uint8_t*  qemu_fb_ptr = xnu_ramfb->qemu_fb_ptr;
++
++    assert(qemu_fb_ptr != 0);
++    assert(fb_pa != 0);
++
++    address_space_rw((AddressSpace*) as, fb_pa, MEMTXATTRS_UNSPECIFIED,
++                qemu_fb_ptr, fb_size, FALSE);
++    ds = qemu_create_displaysurface_from(
++        width, height, format, linesize, qemu_fb_ptr);
++    if (ds) {
++        dpy_gfx_replace_surface(con, ds);
++    }
++    dpy_gfx_update_full(con);
++}
++
++void xnu_display_prolog(xnu_ramfb_state* xnu_fb_state)
++{
++    //currently empty
++    return;
++}
++
++void xnu_ramfb_setup(xnu_ramfb_state* xnu_fb_state)
++{
++    uint8_t* fb_ptr;
++    xnu_fb_state->display_cfg.format = PIXMAN_LE_r8g8b8;
++
++    if (xnu_fb_state->fb_size == 0){
++        fprintf(stderr,
++            "xnu_ram_fb: size for the framebuffer is zero, aborting...\n");
++        abort();
++    }
++    fb_ptr = g_malloc0(xnu_fb_state->fb_size);
++    if (fb_ptr == NULL){
++        fprintf(stderr,
++            "xnu_ram_fb: failed to allocate memory for the framebuffer.\n");
++        abort();
++    }
++    xnu_fb_state->qemu_fb_ptr = fb_ptr;
++
++    xnu_display_prolog(xnu_fb_state);
++}
++
++void xnu_ramfb_free(uint8_t* qemu_fb_ptr)
++{
++    g_free(qemu_fb_ptr);
++}
++
++static const GraphicHwOps wrapper_ops = {
++    .gfx_update = xnu_ramfb_display_update,
++};
++
++static void xnu_ramfb_realizefn(DeviceState *dev, Error **errp)
++{
++    xnu_ramfb_state *xnu_ramfb = XNU_RAMFB(dev);
++    xnu_ramfb->con = graphic_console_init(dev, 0, &wrapper_ops, dev);
++    xnu_ramfb_setup(xnu_ramfb);
++}
++
++static void xnu_ramfb_unrealizefn(DeviceState *dev, Error **errp)
++{
++    xnu_ramfb_state *xnu_ramfb = XNU_RAMFB(dev);
++    graphic_console_close(xnu_ramfb->con);
++    xnu_ramfb_free(xnu_ramfb->qemu_fb_ptr);
++}
++
++static Property xnu_ramfb_properties[] = {
++    DEFINE_PROP_UINT64("as", xnu_ramfb_state, as, 0),
++    DEFINE_PROP_UINT64("fb_pa", xnu_ramfb_state, fb_pa, 0),
++    DEFINE_PROP_UINT32("fb_size", xnu_ramfb_state, fb_size, 0),
++    DEFINE_PROP_UINT32("display_cfg.width", xnu_ramfb_state,
++                display_cfg.width, 0),
++    DEFINE_PROP_UINT32("display_cfg.height", xnu_ramfb_state,
++                display_cfg.height, 0),
++    DEFINE_PROP_UINT32("display_cfg.linesize", xnu_ramfb_state,
++                display_cfg.linesize, 0),
++    DEFINE_PROP_END_OF_LIST(),
++};
++
++static void xnu_ramfb_class_initfn(ObjectClass *klass, void *data)
++{
++    DeviceClass *dc = DEVICE_CLASS(klass);
++
++    set_bit(DEVICE_CATEGORY_DISPLAY, dc->categories);
++    dc->realize = xnu_ramfb_realizefn;
++    dc->unrealize = xnu_ramfb_unrealizefn;
++    dc->props = xnu_ramfb_properties;
++    dc->desc = "xnu ram framebuffer";
++    dc->user_creatable = true;
++}
++
++static const TypeInfo xnu_ramfb_info = {
++    .name          = TYPE_XNU_RAMFB_DEVICE,
++    .parent        = TYPE_SYS_BUS_DEVICE,
++    .instance_size = sizeof(xnu_ramfb_state),
++    .class_init    = xnu_ramfb_class_initfn,
++};
++
++static void xnu_ramfb_register_types(void)
++{
++    type_register_static(&xnu_ramfb_info);
++}
++
++type_init(xnu_ramfb_register_types)
+diff --git a/xnu-qemu-arm64-5.1.0/include/hw/arm/guest-services/fds.h b/xnu-qemu-arm64-5.1.0/include/hw/arm/guest-services/fds.h
+new file mode 100644
+index 0000000..83a415c
+--- /dev/null
++++ b/xnu-qemu-arm64-5.1.0/include/hw/arm/guest-services/fds.h
+@@ -0,0 +1,67 @@
++/*
++ * QEMU TCP Tunnelling
++ *
++ * Copyright (c) 2019 Lev Aronsky <aronsky@gmail.com>
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a copy
++ * of this software and associated documentation files (the "Software"), to deal
++ * in the Software without restriction, including without limitation the rights
++ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
++ * copies of the Software, and to permit persons to whom the Software is
++ * furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice shall be included in
++ * all copies or substantial portions of the Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
++ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
++ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
++ * THE SOFTWARE.
++ */
++
++#ifndef HW_ARM_GUEST_SERVICES_FDS_H
++#define HW_ARM_GUEST_SERVICES_FDS_H
++
++#ifndef OUT_OF_TREE_BUILD
++#include "qemu/osdep.h"
++#else
++#include "sys/types.h"
++#include "sys/socket.h"
++#endif
++
++#define MAX_FD_COUNT (256)
++
++#pragma GCC diagnostic push
++#pragma GCC diagnostic ignored "-Wredundant-decls"
++extern int32_t guest_svcs_errno;
++#pragma GCC diagnostic pop
++extern int32_t guest_svcs_fds[MAX_FD_COUNT];
++
++#define VERIFY_FD(s) \
++    if ((s < 0) || (s >= MAX_FD_COUNT) || (-1 == guest_svcs_fds[s])) return -1;
++
++typedef struct __attribute__((packed)) {
++    int32_t fd;
++} qc_close_args_t;
++
++typedef struct __attribute__((packed)) {
++    int32_t fd;
++    int32_t cmd;
++    union {
++        int32_t flags;
++    };
++} qc_fcntl_args_t;
++
++#ifndef OUT_OF_TREE_BUILD
++int32_t qc_handle_close(CPUState *cpu, int32_t fd);
++int32_t qc_handle_fcntl_getfl(CPUState *cpu, int32_t fd);
++int32_t qc_handle_fcntl_setfl(CPUState *cpu, int32_t fd, int32_t flags);
++#else
++int qc_close(int fd);
++int qc_fcntl(int fd, int cmd, ...);
++#endif
++
++#endif // HW_ARM_GUEST_SERVICES_FDS_H
+diff --git a/xnu-qemu-arm64-5.1.0/include/hw/arm/guest-services/file.h b/xnu-qemu-arm64-5.1.0/include/hw/arm/guest-services/file.h
+new file mode 100644
+index 0000000..bd88591
+--- /dev/null
++++ b/xnu-qemu-arm64-5.1.0/include/hw/arm/guest-services/file.h
+@@ -0,0 +1,69 @@
++/*
++ * QEMU Host file guest access
++ *
++ * Copyright (c) 2020 Jonathan Afek <jonyafek@me.com>
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a copy
++ * of this software and associated documentation files (the "Software"), to deal
++ * in the Software without restriction, including without limitation the rights
++ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
++ * copies of the Software, and to permit persons to whom the Software is
++ * furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice shall be included in
++ * all copies or substantial portions of the Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
++ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
++ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
++ * THE SOFTWARE.
++ */
++
++#ifndef HW_ARM_GUEST_SERVICES_FILE_H
++#define HW_ARM_GUEST_SERVICES_FILE_H
++
++#ifndef OUT_OF_TREE_BUILD
++#include "qemu/osdep.h"
++#else
++#include "sys/types.h"
++#endif
++
++#define MAX_FILE_FDS (8)
++#define MAX_FILE_TRANSACTION_LEN (0x2000)
++
++#pragma GCC diagnostic push
++#pragma GCC diagnostic ignored "-Wredundant-decls"
++extern int32_t guest_svcs_errno;
++#pragma GCC diagnostic pop
++
++typedef struct __attribute__((packed)) {
++    uint64_t buffer_guest_ptr;
++    uint64_t length;
++    uint64_t offset;
++    uint64_t index;
++} qc_write_file_args_t, qc_read_file_args_t;
++
++typedef struct __attribute__((packed)) {
++    uint64_t index;
++} qc_size_file_args_t;
++
++#ifndef OUT_OF_TREE_BUILD
++void qc_file_open(uint64_t index, const char *filename);
++
++int64_t qc_handle_write_file(CPUState *cpu, uint64_t buffer_guest_ptr,
++                             uint64_t length, uint64_t offset, uint64_t index);
++int64_t qc_handle_read_file(CPUState *cpu, uint64_t buffer_guest_ptr,
++                            uint64_t length, uint64_t offset, uint64_t index);
++int64_t qc_handle_size_file(uint64_t index);
++#else
++int64_t qc_write_file(void *buffer_guest_ptr, uint64_t length,
++                      uint64_t offset, uint64_t index);
++int64_t qc_read_file(void *buffer_guest_ptr, uint64_t length,
++                     uint64_t offset, uint64_t index);
++int64_t qc_size_file(uint64_t index);
++#endif
++
++#endif
+diff --git a/xnu-qemu-arm64-5.1.0/include/hw/arm/guest-services/general.h b/xnu-qemu-arm64-5.1.0/include/hw/arm/guest-services/general.h
+new file mode 100644
+index 0000000..3b07d40
+--- /dev/null
++++ b/xnu-qemu-arm64-5.1.0/include/hw/arm/guest-services/general.h
+@@ -0,0 +1,88 @@
++/*
++ * QEMU TCP Tunnelling
++ *
++ * Copyright (c) 2019 Lev Aronsky <aronsky@gmail.com>
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a copy
++ * of this software and associated documentation files (the "Software"), to deal
++ * in the Software without restriction, including without limitation the rights
++ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
++ * copies of the Software, and to permit persons to whom the Software is
++ * furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice shall be included in
++ * all copies or substantial portions of the Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
++ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
++ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
++ * THE SOFTWARE.
++ */
++
++#ifndef HW_ARM_GUEST_SERVICES_GENERAL_H
++#define HW_ARM_GUEST_SERVICES_GENERAL_H
++
++#include "hw/arm/guest-services/socket.h"
++#include "hw/arm/guest-services/fds.h"
++#include "hw/arm/guest-services/file.h"
++
++#pragma GCC diagnostic push
++#pragma GCC diagnostic ignored "-Wredundant-decls"
++extern int32_t guest_svcs_errno;
++#pragma GCC diagnostic pop
++
++typedef enum {
++    // File Descriptors API
++    QC_CLOSE = 0x100,
++    QC_FCNTL,
++
++    // Socket API
++    QC_SOCKET = 0x110,
++    QC_ACCEPT,
++    QC_BIND,
++    QC_CONNECT,
++    QC_LISTEN,
++    QC_RECV,
++    QC_SEND,
++    QC_WRITE_FILE,
++    QC_READ_FILE,
++    QC_SIZE_FILE,
++} qemu_call_number_t;
++
++typedef struct __attribute__((packed)) {
++    // Request
++    qemu_call_number_t call_number;
++    union {
++        // File Descriptors API
++        qc_close_args_t close;
++        qc_fcntl_args_t fcntl;
++        // Socket API
++        qc_socket_args_t socket;
++        qc_accept_args_t accept;
++        qc_bind_args_t bind;
++        qc_connect_args_t connect;
++        qc_listen_args_t listen;
++        qc_recv_args_t recv;
++        qc_send_args_t send;
++        qc_write_file_args_t write_file;
++        qc_read_file_args_t read_file;
++        qc_size_file_args_t size_file;
++    } args;
++
++    // Response
++    int64_t retval;
++    int64_t error;
++} qemu_call_t;
++
++#ifndef OUT_OF_TREE_BUILD
++uint64_t qemu_call_status(CPUARMState *env, const ARMCPRegInfo *ri);
++void qemu_call(CPUARMState *env, const ARMCPRegInfo *ri, uint64_t value);
++#else
++uint64_t qemu_call_status(qemu_call_t *qcall);
++void qemu_call(qemu_call_t *qcall);
++#endif
++
++#endif // HW_ARM_GUEST_SERVICES_GENERAL_H
+diff --git a/xnu-qemu-arm64-5.1.0/include/hw/arm/guest-services/socket.h b/xnu-qemu-arm64-5.1.0/include/hw/arm/guest-services/socket.h
+new file mode 100644
+index 0000000..ff98bd8
+--- /dev/null
++++ b/xnu-qemu-arm64-5.1.0/include/hw/arm/guest-services/socket.h
+@@ -0,0 +1,96 @@
++/*
++ * QEMU TCP Tunnelling
++ *
++ * Copyright (c) 2019 Lev Aronsky <aronsky@gmail.com>
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a copy
++ * of this software and associated documentation files (the "Software"), to deal
++ * in the Software without restriction, including without limitation the rights
++ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
++ * copies of the Software, and to permit persons to whom the Software is
++ * furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice shall be included in
++ * all copies or substantial portions of the Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
++ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
++ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
++ * THE SOFTWARE.
++ */
++
++#ifndef HW_ARM_GUEST_SERVICES_SOCKET_H
++#define HW_ARM_GUEST_SERVICES_SOCKET_H
++
++#ifndef OUT_OF_TREE_BUILD
++#include "qemu/osdep.h"
++#else
++#include "sys/types.h"
++#include "sys/socket.h"
++#endif
++
++#pragma GCC diagnostic push
++#pragma GCC diagnostic ignored "-Wredundant-decls"
++extern int32_t guest_svcs_errno;
++#pragma GCC diagnostic pop
++
++#define MAX_BUF_SIZE (4096)
++
++typedef struct __attribute__((packed)) {
++    int32_t domain;
++    int32_t type;
++    int32_t protocol;
++} qc_socket_args_t;
++
++typedef struct __attribute__((packed)) {
++    int32_t socket;
++    struct sockaddr *addr;
++    socklen_t *addrlen;
++} qc_accept_args_t;
++
++typedef struct __attribute__((packed)) {
++    int32_t socket;
++    struct sockaddr *addr;
++    socklen_t addrlen;
++} qc_bind_args_t, qc_connect_args_t;
++
++typedef struct __attribute__((packed)) {
++    int32_t socket;
++    int32_t backlog;
++} qc_listen_args_t;
++
++typedef struct __attribute__((packed)) {
++    int32_t socket;
++    void *buffer;
++    size_t length;
++    int flags;
++} qc_recv_args_t, qc_send_args_t;
++
++#ifndef OUT_OF_TREE_BUILD
++int32_t qc_handle_socket(CPUState *cpu, int32_t domain, int32_t type,
++                         int32_t protocol);
++int32_t qc_handle_accept(CPUState *cpu, int32_t sckt, struct sockaddr *addr,
++                         socklen_t *addrlen);
++int32_t qc_handle_bind(CPUState *cpu, int32_t sckt, struct sockaddr *addr,
++                       socklen_t addrlen);
++int32_t qc_handle_connect(CPUState *cpu, int32_t sckt, struct sockaddr *addr,
++                          socklen_t addrlen);
++int32_t qc_handle_listen(CPUState *cpu, int32_t sckt, int32_t backlog);
++int32_t qc_handle_recv(CPUState *cpu, int32_t sckt, void *buffer,
++                       size_t length, int32_t flags);
++int32_t qc_handle_send(CPUState *cpu, int32_t sckt, void *buffer,
++                       size_t length, int32_t flags);
++#else
++int qc_socket(int domain, int type, int protocol);
++int qc_accept(int sckt, struct sockaddr *addr, socklen_t *addrlen);
++int qc_bind(int sckt, const struct sockaddr *addr, socklen_t addrlen);
++int qc_connect(int sckt, const struct sockaddr *addr, socklen_t addrlen);
++int qc_listen(int sckt, int backlog);
++ssize_t qc_recv(int sckt, void *buffer, size_t length, int flags);
++ssize_t qc_send(int sckt, const void *buffer, size_t length, int flags);
++#endif
++
++#endif // HW_ARM_GUEST_SERVICES_SOCKET_H
+diff --git a/xnu-qemu-arm64-5.1.0/include/hw/arm/j273_macos11.h b/xnu-qemu-arm64-5.1.0/include/hw/arm/j273_macos11.h
+new file mode 100644
+index 0000000..3b9e07a
+--- /dev/null
++++ b/xnu-qemu-arm64-5.1.0/include/hw/arm/j273_macos11.h
+@@ -0,0 +1,117 @@
++/*
++ * iPhone 6s plus - n66 - S8000
++ *
++ * Copyright (c) 2019 Jonathan Afek <jonyafek@me.com>
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a copy
++ * of this software and associated documentation files (the "Software"), to deal
++ * in the Software without restriction, including without limitation the rights
++ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
++ * copies of the Software, and to permit persons to whom the Software is
++ * furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice shall be included in
++ * all copies or substantial portions of the Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
++ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
++ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
++ * THE SOFTWARE.
++ */
++
++#ifndef HW_ARM_J273_H
++#define HW_ARM_J273_H
++
++#include "qemu-common.h"
++#include "exec/hwaddr.h"
++#include "hw/boards.h"
++#include "hw/arm/boot.h"
++#include "hw/arm/xnu.h"
++#include "exec/memory.h"
++#include "cpu.h"
++#include "sysemu/kvm.h"
++
++#define MAX_CUSTOM_HOOKS (30)
++
++#define CUSTOM_HOOKS_GLOBALS_SIZE (0x400)
++
++#define TYPE_J273 "macos11-j273-a12z"
++
++#define TYPE_J273_MACHINE   MACHINE_TYPE_NAME(TYPE_J273)
++
++#define J273_MACHINE(obj) \
++    OBJECT_CHECK(J273MachineState, (obj), TYPE_J273_MACHINE)
++
++#define J273_CPREG_VAR_NAME(name) cpreg_##name
++#define J273_CPREG_VAR_DEF(name) uint64_t J273_CPREG_VAR_NAME(name)
++
++typedef struct {
++    MachineClass parent;
++} J273MachineClass;
++
++typedef struct {
++    MachineState parent;
++    uint64_t hook_funcs_count;
++    hwaddr extra_data_pa;
++    hwaddr kpc_pa;
++    hwaddr kbootargs_pa;
++    hwaddr uart_mmio_pa;
++    ARMCPU *cpu;
++    KernelTrHookParams hook;
++    KernelTrHookParams hook_funcs[MAX_CUSTOM_HOOKS];
++    struct arm_boot_info bootinfo;
++    char ramdisk_filename[1024];
++    char kernel_filename[1024];
++    char dtb_filename[1024];
++    char hook_funcs_cfg[1024 * 1024];
++    char driver_filename[1024];
++    char qc_file_0_filename[1024];
++    char qc_file_1_filename[1024];
++    char qc_file_log_filename[1024];
++    char kern_args[1024];
++    uint16_t tunnel_port;
++    FileMmioDev ramdisk_file_dev;
++    bool use_ramfb;
++    J273_CPREG_VAR_DEF(ARM64_REG_EHID1);
++    J273_CPREG_VAR_DEF(ARM64_REG_EHID10);
++    J273_CPREG_VAR_DEF(ARM64_REG_EHID4);
++    J273_CPREG_VAR_DEF(ARM64_REG_HID11);
++    J273_CPREG_VAR_DEF(ARM64_REG_HID3);
++    J273_CPREG_VAR_DEF(ARM64_REG_HID5);
++    J273_CPREG_VAR_DEF(ARM64_REG_HID4);
++    J273_CPREG_VAR_DEF(ARM64_REG_HID8);
++    J273_CPREG_VAR_DEF(ARM64_REG_HID7);
++    J273_CPREG_VAR_DEF(ARM64_REG_LSU_ERR_STS);
++    J273_CPREG_VAR_DEF(PMC0);
++    J273_CPREG_VAR_DEF(PMC1);
++    J273_CPREG_VAR_DEF(PMCR1);
++    J273_CPREG_VAR_DEF(PMSR);
++    J273_CPREG_VAR_DEF(L2ACTLR_EL1);
++    /* EL2 REGS */
++    J273_CPREG_VAR_DEF(ARM64_REG_MIGSTS_EL1);
++    J273_CPREG_VAR_DEF(ARM64_REG_KERNELKEYLO_EL1);
++    J273_CPREG_VAR_DEF(ARM64_REG_KERNELKEYHI_EL1);
++    J273_CPREG_VAR_DEF(ARM64_REG_VMSA_LOCK_EL1);
++    J273_CPREG_VAR_DEF(APRR_EL0);
++    J273_CPREG_VAR_DEF(APRR_EL1);
++    J273_CPREG_VAR_DEF(CTRR_LOCK);
++    J273_CPREG_VAR_DEF(CTRR_A_LWR_EL1);
++    J273_CPREG_VAR_DEF(CTRR_A_UPR_EL1);
++    J273_CPREG_VAR_DEF(CTRR_CTL_EL1);
++    J273_CPREG_VAR_DEF(APRR_MASK_EN_EL1);
++    J273_CPREG_VAR_DEF(APRR_MASK_EL0);
++    J273_CPREG_VAR_DEF(ACC_CTRR_A_LWR_EL2);
++    J273_CPREG_VAR_DEF(ACC_CTRR_A_UPR_EL2);
++    J273_CPREG_VAR_DEF(ACC_CTRR_CTL_EL2);
++    J273_CPREG_VAR_DEF(ACC_CTRR_LOCK_EL2);
++    J273_CPREG_VAR_DEF(ARM64_REG_CYC_CFG);
++    J273_CPREG_VAR_DEF(ARM64_REG_CYC_OVRD);
++    J273_CPREG_VAR_DEF(IPI_SR);
++    J273_CPREG_VAR_DEF(UPMCR0);
++    J273_CPREG_VAR_DEF(UPMPCM);
++} J273MachineState;
++
++#endif
+diff --git a/xnu-qemu-arm64-5.1.0/include/hw/arm/xnu.h b/xnu-qemu-arm64-5.1.0/include/hw/arm/xnu.h
+new file mode 100644
+index 0000000..b5e696d
+--- /dev/null
++++ b/xnu-qemu-arm64-5.1.0/include/hw/arm/xnu.h
+@@ -0,0 +1,157 @@
++/*
++ *
++ * Copyright (c) 2019 Jonathan Afek <jonyafek@me.com>
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a copy
++ * of this software and associated documentation files (the "Software"), to deal
++ * in the Software without restriction, including without limitation the rights
++ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
++ * copies of the Software, and to permit persons to whom the Software is
++ * furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice shall be included in
++ * all copies or substantial portions of the Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
++ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
++ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
++ * THE SOFTWARE.
++ */
++
++#ifndef HW_ARM_XNU_H
++#define HW_ARM_XNU_H
++
++#include "qemu-common.h"
++#include "hw/arm/boot.h"
++#include "hw/arm/xnu_mem.h"
++#include "hw/arm/xnu_trampoline_hook.h"
++#include "hw/arm/xnu_dtb.h"
++#include "hw/arm/xnu_cpacr.h"
++#include "hw/arm/xnu_pagetable.h"
++#include "hw/arm/xnu_trampoline_hook.h"
++#include "hw/arm/xnu_file_mmio_dev.h"
++#include "hw/arm/xnu_fb_cfg.h"
++
++// pexpert/pexpert/arm64/boot.h
++#define xnu_arm64_kBootArgsRevision2 2 /* added boot_args.bootFlags */
++#define xnu_arm64_kBootArgsVersion2 2
++#define xnu_arm64_BOOT_LINE_LENGTH 256
++
++#define LC_SEGMENT_64   0x19
++#define LC_UNIXTHREAD   0x5
++
++struct segment_command_64
++{
++    uint32_t cmd;
++    uint32_t cmdsize;
++    char segname[16];
++    uint64_t vmaddr;
++    uint64_t vmsize;
++    uint64_t fileoff;
++    uint64_t filesize;
++    uint32_t /*vm_prot_t*/ maxprot;
++    uint32_t /*vm_prot_t*/ initprot;
++    uint32_t nsects;
++    uint32_t flags;
++};
++
++struct mach_header_64 {
++    uint32_t    magic;      /* mach magic number identifier */
++    uint32_t /*cpu_type_t*/  cputype;    /* cpu specifier */
++    uint32_t /*cpu_subtype_t*/   cpusubtype; /* machine specifier */
++    uint32_t    filetype;   /* type of file */
++    uint32_t    ncmds;      /* number of load commands */
++    uint32_t    sizeofcmds; /* the size of all the load commands */
++    uint32_t    flags;      /* flags */
++    uint32_t    reserved;   /* reserved */
++};
++
++struct load_command {
++    uint32_t cmd;       /* type of load command */
++    uint32_t cmdsize;   /* total size of command in bytes */
++};
++
++typedef struct xnu_arm64_video_boot_args {
++    unsigned long v_baseAddr; /* Base address of video memory */
++    unsigned long v_display;  /* Display Code (if Applicable */
++    unsigned long v_rowBytes; /* Number of bytes per pixel row */
++    unsigned long v_width;    /* Width */
++    unsigned long v_height;   /* Height */
++    unsigned long v_depth;    /* Pixel Depth and other parameters */
++} video_boot_args;
++
++typedef struct xnu_arm64_monitor_boot_args {
++	uint64_t	version;                        /* structure version - this is version 2 */
++	uint64_t	virtBase;                       /* virtual base of memory assigned to the monitor */
++	uint64_t	physBase;                       /* physical address corresponding to the virtual base */
++	uint64_t	memSize;                        /* size of memory assigned to the monitor */
++	uint64_t	kernArgs;                       /* physical address of the kernel boot_args structure */
++	uint64_t	kernEntry;                      /* kernel entrypoint */
++	uint64_t	kernPhysBase;                   /* physical base of the kernel's address space */
++	uint64_t	kernPhysSlide;                  /* offset from kernPhysBase to kernel load address */
++	uint64_t	kernVirtSlide;                  /* virtual slide applied to kernel at load time */
++} monitor_boot_args;
++
++struct xnu_arm64_boot_args {
++    uint16_t           Revision;                                   /* Revision of boot_args structure */
++    uint16_t           Version;                                    /* Version of boot_args structure */
++    uint64_t           virtBase;                                   /* Virtual base of memory */
++    uint64_t           physBase;                                   /* Physical base of memory */
++    uint64_t           memSize;                                    /* Size of memory */
++    uint64_t           topOfKernelData;                            /* Highest physical address used in kernel data area */
++    video_boot_args    Video;                                      /* Video Information */
++    uint32_t           machineType;                                /* Machine Type */
++    uint64_t           deviceTreeP;                                /* Base of flattened device tree */
++    uint32_t           deviceTreeLength;                           /* Length of flattened tree */
++    char               CommandLine[xnu_arm64_BOOT_LINE_LENGTH];    /* Passed in command line */
++    uint64_t           bootFlags;                                  /* Additional flags specified by the bootloader */
++    uint64_t           memSizeActual;                              /* Actual size of memory */
++};
++
++void macho_file_highest_lowest_base(const char *filename, hwaddr phys_base,
++                                    hwaddr *virt_base, hwaddr *lowest,
++                                    hwaddr *highest);
++
++void macho_tz_setup_bootargs(const char *name, AddressSpace *as,
++                             MemoryRegion *mem, hwaddr bootargs_addr,
++                             hwaddr virt_base, hwaddr phys_base,
++                             hwaddr mem_size, hwaddr kern_args,
++                             hwaddr kern_entry, hwaddr kern_phys_base);
++
++void macho_setup_bootargs(const char *name, AddressSpace *as,
++                          MemoryRegion *mem, hwaddr bootargs_pa,
++                          hwaddr virt_base, hwaddr phys_base, hwaddr mem_size,
++                          hwaddr top_of_kernel_data_pa, hwaddr dtb_va,
++                          hwaddr dtb_size, video_boot_args v_bootargs,
++                          char *kern_args);
++
++void arm_load_macho(char *filename, AddressSpace *as, MemoryRegion *mem,
++                    const char *name, hwaddr phys_base, hwaddr virt_base,
++                    hwaddr low_virt_addr, hwaddr high_virt_addr, hwaddr *pc,
++                    char *darwin_ver);
++
++void macho_map_raw_file(const char *filename, AddressSpace *as, MemoryRegion *mem,
++                         const char *name, hwaddr file_pa, uint64_t *size);
++
++void macho_load_raw_file(const char *filename, AddressSpace *as, MemoryRegion *mem,
++                         const char *name, hwaddr file_pa, uint64_t *size);
++
++void macho_load_dtb(char *filename, AddressSpace *as, MemoryRegion *mem,
++                    const char *name, hwaddr dtb_pa, uint64_t *size,
++                    hwaddr ramdisk_addr, hwaddr ramdisk_size,
++                    hwaddr *uart_mmio_pa);
++
++#define MAX_CUSTOM_HOOKS (30)
++
++#define CUSTOM_HOOKS_GLOBALS_SIZE (0x400)
++
++typedef struct {
++    uint8_t hook_code[HOOK_CODE_ALLOC_SIZE];
++    uint8_t hook_funcs_code[MAX_CUSTOM_HOOKS][HOOK_CODE_ALLOC_SIZE];
++    uint8_t ramfb[RAMFB_SIZE];
++    uint8_t hook_globals[CUSTOM_HOOKS_GLOBALS_SIZE];
++} __attribute__((packed)) AllocatedData;
++#endif
+diff --git a/xnu-qemu-arm64-5.1.0/include/hw/arm/xnu_cpacr.h b/xnu-qemu-arm64-5.1.0/include/hw/arm/xnu_cpacr.h
+new file mode 100644
+index 0000000..45220eb
+--- /dev/null
++++ b/xnu-qemu-arm64-5.1.0/include/hw/arm/xnu_cpacr.h
+@@ -0,0 +1,40 @@
++/*
++ *
++ * Copyright (c) 2019 Jonathan Afek <jonyafek@me.com>
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a copy
++ * of this software and associated documentation files (the "Software"), to deal
++ * in the Software without restriction, including without limitation the rights
++ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
++ * copies of the Software, and to permit persons to whom the Software is
++ * furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice shall be included in
++ * all copies or substantial portions of the Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
++ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
++ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
++ * THE SOFTWARE.
++ */
++
++#ifndef HW_ARM_XNU_CPACR_H
++#define HW_ARM_XNU_CPACR_H
++
++#include "qemu-common.h"
++#include "hw/arm/boot.h"
++#include "cpu.h"
++
++typedef struct {
++    uint64_t val;
++    CPWriteFn *wfn_a64;
++    CPWriteFn *wfn_a32_ns;
++    CPWriteFn *wfn_a32_s;
++} CpacrIntCtx;
++
++void xnu_cpacr_intercept_write_const_val(ARMCPU *cpu, uint64_t val);
++
++#endif
+diff --git a/xnu-qemu-arm64-5.1.0/include/hw/arm/xnu_dtb.h b/xnu-qemu-arm64-5.1.0/include/hw/arm/xnu_dtb.h
+new file mode 100644
+index 0000000..5ae6fa1
+--- /dev/null
++++ b/xnu-qemu-arm64-5.1.0/include/hw/arm/xnu_dtb.h
+@@ -0,0 +1,59 @@
++/*
++ *
++ * Copyright (c) 2019 Jonathan Afek <jonyafek@me.com>
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a copy
++ * of this software and associated documentation files (the "Software"), to deal
++ * in the Software without restriction, including without limitation the rights
++ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
++ * copies of the Software, and to permit persons to whom the Software is
++ * furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice shall be included in
++ * all copies or substantial portions of the Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
++ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
++ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
++ * THE SOFTWARE.
++ */
++
++#ifndef HW_ARM_XNU_DTB_H
++#define HW_ARM_XNU_DTB_H
++
++#include "qemu-common.h"
++#include "hw/arm/boot.h"
++#include "hw/arm/xnu_mem.h"
++
++#define DT_PROP_FLAG_PLACEHOLDER (0x80000000)
++
++#define DTB_PROP_NAME_LEN (32)
++
++typedef struct {
++    uint8_t name[DTB_PROP_NAME_LEN];
++    uint32_t length;
++    uint8_t *value;
++} DTBProp;
++
++typedef struct {
++    uint32_t prop_count;
++    uint32_t child_node_count;
++    GList *props;
++    GList *child_nodes;
++} DTBNode;
++
++DTBNode *load_dtb(uint8_t *dtb_blob);
++void delete_dtb_node(DTBNode *node);
++void save_dtb(uint8_t *buf, DTBNode *root);
++void remove_dtb_prop(DTBNode *node, DTBProp *prop);
++void add_dtb_prop(DTBNode *n, const char *name, uint32_t size, uint8_t *val);
++uint64_t get_dtb_node_buffer_size(DTBNode *node);
++DTBProp *get_dtb_prop(DTBNode *node, const char *name);
++DTBNode *get_dtb_child_node_by_name(DTBNode *node, const char *name);
++void overwrite_dtb_prop_val(DTBProp *prop, uint8_t chr);
++void overwrite_dtb_prop_name(DTBProp *prop, uint8_t chr);
++
++#endif
+diff --git a/xnu-qemu-arm64-5.1.0/include/hw/arm/xnu_fb_cfg.h b/xnu-qemu-arm64-5.1.0/include/hw/arm/xnu_fb_cfg.h
+new file mode 100644
+index 0000000..0adb763
+--- /dev/null
++++ b/xnu-qemu-arm64-5.1.0/include/hw/arm/xnu_fb_cfg.h
+@@ -0,0 +1,17 @@
++#ifndef HW_ARM_XNU_RAMFB_CFG_H
++#define HW_ARM_XNU_RAMFB_CFG_H
++
++#include "qemu/osdep.h"
++
++#define RAMFB_SIZE 0x2D4C00
++
++#define V_DEPTH     16
++#define V_HEIGHT    800
++#define V_WIDTH     600
++#define V_DISPLAY   0
++#define V_LINESIZE  (V_WIDTH * 3)
++
++void xnu_define_ramfb_device(AddressSpace* as, hwaddr ramfb_pa);
++void xnu_get_video_bootargs(void *opaque, hwaddr ramfb_pa);
++
++#endif
+\ No newline at end of file
+diff --git a/xnu-qemu-arm64-5.1.0/include/hw/arm/xnu_file_mmio_dev.h b/xnu-qemu-arm64-5.1.0/include/hw/arm/xnu_file_mmio_dev.h
+new file mode 100644
+index 0000000..8864b37
+--- /dev/null
++++ b/xnu-qemu-arm64-5.1.0/include/hw/arm/xnu_file_mmio_dev.h
+@@ -0,0 +1,39 @@
++/*
++ *
++ * Copyright (c) 2019 Jonathan Afek <jonyafek@me.com>
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a copy
++ * of this software and associated documentation files (the "Software"), to deal
++ * in the Software without restriction, including without limitation the rights
++ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
++ * copies of the Software, and to permit persons to whom the Software is
++ * furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice shall be included in
++ * all copies or substantial portions of the Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
++ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
++ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
++ * THE SOFTWARE.
++ */
++
++#ifndef HW_ARM_FILE_MMIO_DEV_H
++#define HW_ARM_FILE_MMIO_DEV_H
++
++#include "qemu-common.h"
++#include "hw/arm/boot.h"
++
++typedef struct {
++    hwaddr pa;
++    hwaddr size;
++    int fd;
++} FileMmioDev;
++
++void xnu_file_mmio_dev_create(MemoryRegion *sysmem, FileMmioDev *file_dev,
++                              const char *name, const char *filename);
++
++#endif
+diff --git a/xnu-qemu-arm64-5.1.0/include/hw/arm/xnu_mem.h b/xnu-qemu-arm64-5.1.0/include/hw/arm/xnu_mem.h
+new file mode 100644
+index 0000000..8b2ff6e
+--- /dev/null
++++ b/xnu-qemu-arm64-5.1.0/include/hw/arm/xnu_mem.h
+@@ -0,0 +1,50 @@
++/*
++ *
++ * Copyright (c) 2019 Jonathan Afek <jonyafek@me.com>
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a copy
++ * of this software and associated documentation files (the "Software"), to deal
++ * in the Software without restriction, including without limitation the rights
++ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
++ * copies of the Software, and to permit persons to whom the Software is
++ * furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice shall be included in
++ * all copies or substantial portions of the Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
++ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
++ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
++ * THE SOFTWARE.
++ */
++
++#ifndef HW_ARM_XNU_MEM_H
++#define HW_ARM_XNU_MEM_H
++
++#include "qemu-common.h"
++#include "hw/arm/boot.h"
++#include "target/arm/cpu.h"
++
++extern hwaddr g_virt_base;
++extern hwaddr g_phys_base;
++
++hwaddr vtop_static(hwaddr va);
++hwaddr ptov_static(hwaddr pa);
++hwaddr vtop_mmu(hwaddr va, CPUState *cs);
++
++hwaddr align_64k_low(hwaddr addr);
++hwaddr align_64k_high(hwaddr addr);
++
++hwaddr vtop_bases(hwaddr va, hwaddr phys_base, hwaddr virt_base);
++hwaddr ptov_bases(hwaddr pa, hwaddr phys_base, hwaddr virt_base);
++
++uint8_t get_highest_different_bit_index(hwaddr addr1, hwaddr addr2);
++uint8_t get_lowest_non_zero_bit_index(hwaddr addr);
++hwaddr get_low_bits_mask_for_bit_index(uint8_t bit_index);
++
++void allocate_ram(MemoryRegion *top, const char *name, hwaddr addr,
++                  hwaddr size);
++#endif
+diff --git a/xnu-qemu-arm64-5.1.0/include/hw/arm/xnu_pagetable.h b/xnu-qemu-arm64-5.1.0/include/hw/arm/xnu_pagetable.h
+new file mode 100644
+index 0000000..2bc6fbc
+--- /dev/null
++++ b/xnu-qemu-arm64-5.1.0/include/hw/arm/xnu_pagetable.h
+@@ -0,0 +1,34 @@
++/*
++ *
++ * Copyright (c) 2019 Jonathan Afek <jonyafek@me.com>
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a copy
++ * of this software and associated documentation files (the "Software"), to deal
++ * in the Software without restriction, including without limitation the rights
++ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
++ * copies of the Software, and to permit persons to whom the Software is
++ * furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice shall be included in
++ * all copies or substantial portions of the Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
++ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
++ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
++ * THE SOFTWARE.
++ */
++
++#ifndef HW_ARM_XNU_PAGETABLE_H
++#define HW_ARM_XNU_PAGETABLE_H
++
++#include "qemu-common.h"
++#include "hw/arm/boot.h"
++#include "cpu.h"
++
++hwaddr pt_tte_el1(ARMCPU *cpu, AddressSpace *as, hwaddr va, bool make_exe);
++void va_make_exec(ARMCPU *cpu, AddressSpace *as, hwaddr va, hwaddr size);
++
++#endif
+diff --git a/xnu-qemu-arm64-5.1.0/include/hw/arm/xnu_trampoline_hook.h b/xnu-qemu-arm64-5.1.0/include/hw/arm/xnu_trampoline_hook.h
+new file mode 100644
+index 0000000..650af10
+--- /dev/null
++++ b/xnu-qemu-arm64-5.1.0/include/hw/arm/xnu_trampoline_hook.h
+@@ -0,0 +1,51 @@
++/*
++ *
++ * Copyright (c) 2019 Jonathan Afek <jonyafek@me.com>
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a copy
++ * of this software and associated documentation files (the "Software"), to deal
++ * in the Software without restriction, including without limitation the rights
++ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
++ * copies of the Software, and to permit persons to whom the Software is
++ * furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice shall be included in
++ * all copies or substantial portions of the Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
++ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
++ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
++ * THE SOFTWARE.
++ */
++
++#ifndef HW_ARM_XNU_TRAMPOLINE_HOOK_H
++#define HW_ARM_XNU_TRAMPOLINE_HOOK_H
++
++#include "qemu-common.h"
++#include "hw/arm/boot.h"
++#include "cpu.h"
++
++#define HOOK_CODE_ALLOC_SIZE (1 << 20)
++
++typedef struct {
++    hwaddr va;
++    hwaddr pa;
++    hwaddr buf_va;
++    hwaddr buf_pa;
++    uint64_t buf_size;
++    uint8_t *code;
++    uint64_t code_size;
++    uint8_t scratch_reg;
++} KernelTrHookParams;
++
++void xnu_hook_tr_copy_install(hwaddr va, hwaddr pa, hwaddr buf_va,
++                              hwaddr buf_pa, uint8_t *code, uint64_t code_size,
++                              uint64_t buf_size, uint8_t scratch_reg);
++void xnu_hook_tr_install(hwaddr va, hwaddr pa, hwaddr cb_va, hwaddr tr_buf_va,
++                         hwaddr tr_buf_pa, uint8_t scratch_reg);
++void xnu_hook_tr_setup(AddressSpace *as, ARMCPU *cpu);
++
++#endif
+diff --git a/xnu-qemu-arm64-5.1.0/include/hw/display/xnu_ramfb.h b/xnu-qemu-arm64-5.1.0/include/hw/display/xnu_ramfb.h
+new file mode 100644
+index 0000000..3ce5f1a
+--- /dev/null
++++ b/xnu-qemu-arm64-5.1.0/include/hw/display/xnu_ramfb.h
+@@ -0,0 +1,12 @@
++#ifndef XNU_RAMFB_H
++#define XNU_RAMFB_H
++
++typedef struct xnu_ramfb_state xnu_ramfb_state;
++void xnu_ramfb_display_update(void *opaque);
++void xnu_ramfb_setup(xnu_ramfb_state* xnu_fb_state);
++void xnu_ramfb_free(uint8_t* qemu_fb_ptr);
++void xnu_display_prolog(xnu_ramfb_state* xnu_fb_state);
++
++#define TYPE_XNU_RAMFB_DEVICE "xnu_ramfb"
++
++#endif /* XNU_RAMFB_H */
+diff --git a/xnu-qemu-arm64-5.1.0/target/arm/helper.c b/xnu-qemu-arm64-5.1.0/target/arm/helper.c
+index 455c92b..6cb6926 100644
+--- a/xnu-qemu-arm64-5.1.0/target/arm/helper.c
++++ b/xnu-qemu-arm64-5.1.0/target/arm/helper.c
+@@ -8486,7 +8486,7 @@ void define_one_arm_cp_reg_with_opaque(ARMCPU *cpu,
+         case 4:
+         case 5:
+             /* min_EL EL2 */
+-            mask = PL2_RW;
++            mask = PL1_RW;
+             break;
+         case 6:
+             /* min_EL EL3 */

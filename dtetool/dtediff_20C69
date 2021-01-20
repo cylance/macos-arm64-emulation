@@ -1,0 +1,45 @@
+&compatible 24 J273aAP\0ADP3,2\0AppleARM s
+&compatible 21 apple,tempest\0ARM,v8 s
+&compatible 13 arm-io,t8027 s
+&compatible 15 uart-1,samsung s
+&compatible 25 gpio,t8020\0gpio,s5l8960x s
+&compatible 6 aic,1 s
+~device_type 10 backlight s
+~name 10 backlight s
+device-tree/cpus/cpu0/state 8 running s
+device-tree/cpus/cpu0/timebase-frequency 8 24000000 d
+device-tree/cpus/cpu0/fixed-frequency 8 24000000 d
+-device-tree/arm-io/dockchannel-uart
+-device-tree/secure-root-prefix
+device-tree/chosen/dram-base 8 0 d
+device-tree/chosen/dram-size 8 0 d
+device-tree/chosen/display-scale 4 1 d
+device-tree/chosen/security-domain 4 0
+device-tree/chosen/chip-epoch 4 0
+device-tree/chosen/debug-enabled 4 0xffffffff h
+device-tree/chosen/lock-regs/amcc/aperture-count 4 0 d
+device-tree/chosen/lock-regs/amcc/aperture-size 4 0 d
+device-tree/chosen/lock-regs/amcc/plane-count 4 0 d
+device-tree/chosen/lock-regs/amcc/plane-stride 4 0 d
+device-tree/chosen/lock-regs/amcc/aperture-phys-addr 0
+device-tree/chosen/lock-regs/amcc/cache-status 4 0 d
+device-tree/chosen/lock-regs/amcc/cache-status-reg-offset 4 0 d
+device-tree/chosen/lock-regs/amcc/cache-status-reg-mask 4 0 d
+device-tree/chosen/lock-regs/amcc/cache-status-reg-value 4 0 d
+device-tree/chosen/lock-regs/amcc/amcc-ctrr-a/page-size-shift 4 0 d
+device-tree/chosen/lock-regs/amcc/amcc-ctrr-a/lower-limit 4 0 d
+device-tree/chosen/lock-regs/amcc/amcc-ctrr-a/lower-limit-reg-offset 4 0 d
+device-tree/chosen/lock-regs/amcc/amcc-ctrr-a/lower-limit-reg-mask 4 0 d
+device-tree/chosen/lock-regs/amcc/amcc-ctrr-a/upper-limit 4 0 d
+device-tree/chosen/lock-regs/amcc/amcc-ctrr-a/upper-limit-reg-offset 4 0 d
+device-tree/chosen/lock-regs/amcc/amcc-ctrr-a/upper-limit-reg-mask 4 0 d
+device-tree/chosen/lock-regs/amcc/amcc-ctrr-a/lock 4 0 d
+device-tree/chosen/lock-regs/amcc/amcc-ctrr-a/lock-reg-offset 4 0 d
+device-tree/chosen/lock-regs/amcc/amcc-ctrr-a/lock-reg-mask 4 0 d
+device-tree/chosen/lock-regs/amcc/amcc-ctrr-a/lock-reg-value 4 0 d
+device-tree/chosen/lock-regs/amcc/amcc-ctrr-a/enable 4 0 d
+device-tree/chosen/lock-regs/amcc/amcc-ctrr-a/write-disable 4 0 d
+device-tree/chosen/nvram-total-size 4 65536 d
+device-tree/chosen/nvram-proxy-data 65536 nvram-proxy-data b
+device-tree/arm-io/ranges 8 0x100000000 h
+device-tree/chosen/random-seed 64 random-seed b

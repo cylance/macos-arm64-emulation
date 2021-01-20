@@ -1,0 +1,28 @@
+\033[1mUsage: dtetool input_file [-d diff_file] [-o output_file] [-p]\033[0m
+Add, remove, or modify device tree properties and entries.
+  -d  diff file to apply to input file
+  -o  device tree output file
+  -p  print device tree to console in a readable format
+      print input file if no output file specified
+
+\033[1mExamples:\033[0m
+  dtetool DeviceTree.im4p -p
+  dtetool DeviceTree.im4p -d dtediff -o DeviceTree.im4p.out
+
+\033[1mDIFF FORMAT\033[0m
+
+Add entries by specifying only the full node path of the entry and nothing else. Add or modify properties by specifying the full node path of the property and a length. No value is required if the length is zero. If a value is specified, a data format specifier is required. Valid data format specifiers are d for decimal, h for hexadecimal, and s for strings. For binary data, use b as the format specifier and a valid filename as the value. Remove properties and entries by prepending the diff with - (dash).
+
+\033[1mPROPERTY MASK\033[0m
+
+If a diff is preceded with & (ampersand), all entries containing the specified property that do NOT match the specified value will be removed from the tree. If a diff is preceded with ~ (tilde), all entries containing the specified property that match the specified value will be removed from the tree. The first field is treated as a single property name and not a full path. A property mask diff must specify a value and type. Multiple masks may be defined.
+
+\033[1mExamples:\033[0m
+  device-tree/chosen/nvram-proxy-data 65536 nvram-proxy-data b
+  device-tree/arm-io/ranges 8 0x100000000 h
+  device-tree/cpus/cpu0/state 8 running s
+  device-tree/chosen/dram-base 8 0 d
+  -device-tree/dockchannel-uart
+  &compatible 15 uart-1,samsumg s
+  ~device_type 10 backlight s
+  device-tree/no-rtc
