@@ -89,7 +89,7 @@ This step can only be done on a macOS system. Copy the ramdisk onto a macOS syst
 hdiutil resize -size 256M -imagekey diskimage-class=CRawDiskImage arm64eSURamDisk.dmg.out
 ```
 # Getting the user binaries
-Copy the ramdisk back onto the Linux system and extract the user binaries:
+Copy the expanded ramdisk back onto the Linux system and extract the user binaries:
 ```
 7z e mac.zip AssetData/Restore/022-10310-098.dmg
 rm mac.zip
