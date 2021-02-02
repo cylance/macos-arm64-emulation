@@ -104,10 +104,10 @@ sudo mount -t hfsplus -o force,rw arm64eSURamDisk.dmg.out ramdisk
 ```
 Transfer the user binaries to ramdisk:
 ```
-sudo cp apfs/root/bin/* ramdisk/bin/
-sudo cp apfs/root/sbin/* ramdisk/sbin/
-sudo cp apfs/root/usr/bin/* ramdisk/usr/bin/
-sudo cp apfs/root/usr/sbin/* ramdisk/usr/sbin/
+sudo cp -rn apfs/root/bin/* ramdisk/bin/
+sudo cp -rn apfs/root/sbin/* ramdisk/sbin/
+sudo cp -rn apfs/root/usr/bin/* ramdisk/usr/bin/
+sudo cp -rn apfs/root/usr/sbin/* ramdisk/usr/sbin/
 ```
 Remove all existing launchd profiles and create a profile for bash:
 ```
