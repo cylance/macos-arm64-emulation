@@ -142,7 +142,7 @@ cat > com.apple.bash.plist << EOF
 </dict>
 </plist>
 EOF 
-sudo mv com.apple.bash.plist ramdisk/System/Library/LaunchDaemons/
+sudo cp com.apple.bash.plist ramdisk/System/Library/LaunchDaemons/
 ```
 Unmount the disk images:
 ```
