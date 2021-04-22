@@ -51,6 +51,8 @@ Fetch the installer package (NOTE: this is a very large ~12GB file):
 ```
 wget http://swcdn.apple.com/content/downloads/00/55/001-86606-A_9SF1TL01U7/5duug9lar1gypwunjfl96dza0upa854qgg/InstallAssistant.pkg
 ```
+(UPDATE: Unfortunately, Apple has removed the above link and it is no longer valid)
+
 Extract the kernel binaries:
 ```
 cd ../../
