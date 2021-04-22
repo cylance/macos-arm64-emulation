@@ -51,7 +51,7 @@ Fetch the installer package (NOTE: this is a very large ~12GB file):
 ```
 wget http://swcdn.apple.com/content/downloads/00/55/001-86606-A_9SF1TL01U7/5duug9lar1gypwunjfl96dza0upa854qgg/InstallAssistant.pkg
 ```
-(UPDATE: Unfortunately, Apple has removed the above link and it is no longer valid. Click [https://mega.nz/file/GZwzGYKb#HscZIOg_K5JdUIvbLwwwW7_Ntc1z9c7QPOcEQRKwp8c](here) to download the files and skip to the [Building QEMU](#building-qemu) section.)
+(UPDATE: Unfortunately, Apple has removed the above link and it is no longer valid. Click [here](https://mega.nz/file/GZwzGYKb#HscZIOg_K5JdUIvbLwwwW7_Ntc1z9c7QPOcEQRKwp8c) to download the files and skip to the [Building QEMU](#building-qemu) section.)
 
 Extract the kernel binaries:
 ```
