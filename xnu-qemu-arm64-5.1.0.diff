@@ -4588,3 +4588,18 @@ index 455c92b..6cb6926 100644
              break;
          case 6:
              /* min_EL EL3 */
+diff --git a/xnu-qemu-arm64-5.1.0/pc-bios/optionrom/Makefile b/xnu-qemu-arm64-5.1.0/pc-bios/optionrom/Makefile
+index e33a24da0d..88fb432773 100644
+--- a/xnu-qemu-arm64-5.1.0/pc-bios/optionrom/Makefile
++++ b/xnu-qemu-arm64-5.1.0/pc-bios/optionrom/Makefile
+@@ -37,8 +37,8 @@ Wa = -Wa,
+ ASFLAGS += -32
+ QEMU_CFLAGS += $(call cc-c-option, $(QEMU_CFLAGS), $(Wa)-32)
+
+-build-all: multiboot.bin linuxboot.bin linuxboot_dma.bin kvmvapic.bin pvh.bin
+-
++#build-all: multiboot.bin linuxboot.bin linuxboot_dma.bin kvmvapic.bin pvh.bin
++build_all:
+ # suppress auto-removal of intermediate files
+ .SECONDARY:
+
